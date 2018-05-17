@@ -123,7 +123,6 @@ class P():
 
                 result = " ".join(address)
                 result = re.sub(' +', " ", result)
-                print(result)
                 return result
 
         def func_wrapper(address):
@@ -135,5 +134,3 @@ class P():
 @P.google
 def test2(address):
     return address
-
-print(test2('130-30 31ST        AVE'))

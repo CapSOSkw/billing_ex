@@ -25,21 +25,40 @@ from shapely.geometry import Point, Polygon
 import urllib.parse
 from pymongo import MongoClient
 from decimal import Decimal as D
+from functools import wraps
 
 
-class info_locker(object):
+def CleanAddress(func):
 
-    driver_information = None
+    def clean_address(address):
+        '''
 
+        :param address: string type
+        :return: clean address, remove apartment, floor, etc..
+        '''
+        if type(address) is float:
+            return
+        else:
+            address = address.upper()
+            address = address.replace(".", " ").split(" ")
+            for i in address:
+                if i in ['AV', 'AVE', 'AVENUE', 'BLD', 'BOULEVARD', 'BLVD', 'BLDG', 'BOWERY', 'BROADWAY', 'CI',
+                         'CT', 'CIR', 'DR', 'DRIVER', 'EXP', 'EXPY', 'EXPRESSWAY', 'EXPWY', 'EXWY',
+                         'HIGHWAY', 'HWY', 'LN', 'PL', 'PI', 'PARKWAY', 'PLACE', 'PLZ', 'PKWY', 'RD', 'ROAD',
+                         'SQ', 'STR', 'ST', 'STREET', 'SQUARE', 'TNPK', 'TPKE', 'TURNPIKE', 'WAY', 'MALL']:
+                    del address[address.index(i) + 1:]
 
-class Process_Methods():
-    '''
-    Some basic processing functions
-    '''
-    def __init__(self):
-        pass
+            result = " ".join(address)
+            result = re.sub(' +', " ", result)
 
-    @staticmethod
+            return result
+
+    @wraps(func)
+    def wrapper(*args):
+        return func(clean_address(*args))
+    return wrapper
+
+def Google(func):
     def Google2Geo(address):
         '''
 
@@ -70,8 +89,57 @@ class Process_Methods():
             geometry = result[0]['geometry']['location']
             return geometry['lng'], geometry['lat']
 
+    @wraps(func)
+    def wrapper(*args):
+        return func(Google2Geo(*args))
+    return wrapper
+
+
+class info_locker(object):
+
+    driver_information = None
+
+
+class Process_Methods():
+    '''
+    Some basic processing functions
+    '''
+    def __init__(self):
+        pass
+
     @staticmethod
-    def clean_address(address):
+    def _Google2Geo(address):
+        '''
+
+        :param address: string type
+        :return: Return geo points (lng, lat)
+        '''
+        sq = Sqlite_Methods('ProcedureCodes.db')
+        if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
+        if if_address_in_cache != None:
+
+            return if_address_in_cache[0], if_address_in_cache[1]
+        else:
+
+            Google_geocode_api_url = "https://maps.googleapis.com/maps/api/geocode/json"
+            api_keys = ['AIzaSyCJ69KvhuscmlIgr5IqyOideByOqJzZHcs', 'AIzaSyA-2V1w_acgbN4RO-40e2HJiwnzuMFtrrQ',
+                        'AIzaSyA0b1WxrDmzoJFBuD6zua4CfVXJn1tvgko', 'AIzaSyB3K9wP-0U5EB2AeHsZIN4K5bk0MCBSW2s',
+                        'AIzaSyD0OasuP_KjPwlSAc3kZrU8o4zLRh_bsrM', 'AIzaSyCMdT7Q3a178rNw6KqDt9jp8SSgud5V5gM',
+                        'AIzaSyC-Axh7DKF4GGBkPYpOVrAP3IsAOpwRHkk', 'AIzaSyB_L0jCnP6hdPg8CDxIDnKp6YKGAZ7eQFM',
+                        'AIzaSyAK5T_kCyb1r8aft0sRhy3KBZ1E5N4kcNM']
+            random_key_index = random.randint(0, 8)
+            params = {
+                'address': address,
+                'key': api_keys[random_key_index]
+            }
+            req = requests.get(Google_geocode_api_url, params=params)
+            response = req.json()
+            result = response['results']
+            geometry = result[0]['geometry']['location']
+            return geometry['lng'], geometry['lat']
+
+    @staticmethod
+    def _clean_address(address):
         '''
 
         :param address: string type
@@ -95,6 +163,16 @@ class Process_Methods():
             return result
 
     @staticmethod
+    @CleanAddress
+    def clean_address(address):
+        return address
+
+    @staticmethod
+    @Google
+    def google_address(address):
+        return address
+
+    @staticmethod
     def getPolygonIDs(address):
         sq = Sqlite_Methods('ProcedureCodes.db')
         if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
@@ -105,7 +183,7 @@ class Process_Methods():
             return anti_process_result
 
         else:
-            lng, lat = Process_Methods.Google2Geo(address)
+            lng, lat = Process_Methods.google_address(address)
             result = MongoDB_Methods(localhost=True).getPolygonID(lng=lng, lat=lat)
             process_result = ','.join(map(str, result))
             sq.upsert_address_cache('address_cache_test', address, lng, lat, process_result)
@@ -166,35 +244,6 @@ class Process_Methods():
             }
 
         return result, res_to_dict
-
-
-class Decorator:
-
-    def __init__(self):
-        pass
-
-    @staticmethod
-    def clean_address(func):
-        '''
-        Decorator for cleaning address
-        :param func:
-        :return:
-        '''
-        def wrapper(address):
-            return func(Process_Methods.clean_address(address))
-        return wrapper
-
-    @staticmethod
-    def Google2Geo(func):
-        def wrapper(address):
-            return func(Process_Methods.Google2Geo(address))
-        return wrapper
-
-    @staticmethod
-    def getPolygonID(func):
-        def wrapper(address):
-            return func(Process_Methods.getPolygonIDs(address))
-        return wrapper
 
 
 class MongoDB_Methods():
@@ -422,8 +471,10 @@ class Process_MAS():
             os.makedirs(file_saving_path)
             print('Save files to {0}'.format(file_saving_path))
 
+        print('GENERATING THE FILE...')
         raw_df.to_excel(os.path.join(file_saving_path, 'Processed MAS-{0}-to-{1}.xlsx'.format(min_service_date, max_service_date)),
                             index=False)
+        print('*YEAH! WE MADE IT!*')
 
 
 class Signoff():
@@ -439,6 +490,7 @@ class Signoff():
         totalJob_df.columns = ['FleetNumber', 'ServiceDate', 'CompanyCode', 'CustomerName', 'TripID', 'TollFee',
                                 'Amount', 'pComany', 'pReserve', 'pPerson']
         totalJob_df = totalJob_df.dropna()
+        totalJob_df['Amount'] = totalJob_df['Amount'].apply(lambda x: D(str(x)))
 
         if isinstance(processedMAS, pd.DataFrame):
             mas_df = processedMAS
@@ -466,6 +518,7 @@ class Signoff():
             if idx_in_processedMAS.__len__() != 0:
                 calculated_codes_in_MAS = mas_df.ix[idx_in_processedMAS[0], 'Calculated Codes']
                 leg_mileage = D(mas_df.ix[idx_in_processedMAS[0], 'Leg Mileage'])
+                leg_mileage = D(format(float(leg_mileage), '.2f'))
                 totalJob_df.ix[idx_in_totaljob[0], 'Codes'] = calculated_codes_in_MAS
 
                 for code in calculated_codes_in_MAS.split(','):
@@ -482,9 +535,9 @@ class Signoff():
                     else:
                         MAS_amount += D('0')
 
-                totalJob_df.ix[idx_in_totaljob[0], 'MAS amount'] = float(MAS_amount)
-                totalJob_df.ix[idx_in_totaljob[0], 'Difference'] = float(MAS_amount - \
-                                                                         D(totalJob_df.ix[idx_in_totaljob[0], 'Amount']))
+                MAS_amount = math.floor(float(MAS_amount) * 100) / 100.
+                totalJob_df.ix[idx_in_totaljob[0], 'MAS amount'] = MAS_amount
+                totalJob_df.ix[idx_in_totaljob[0], 'Difference'] = math.floor((MAS_amount - float(totalJob_df.ix[idx_in_totaljob[0], 'Amount'])) * 100) / 100.
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
@@ -581,6 +634,97 @@ class Signoff():
         # output any missed trips in TOTAL JOB but not in SIGNOFF
 
         signoff_data_not_in_TOTALJOB = totalJob_df[~totalJob_df['TripID'].isin(signoff_df['INVOICE ID'])]
+        if signoff_data_not_in_TOTALJOB.__len__() != 0:
+            current_path = os.getcwd()
+            daily_folder = str(datetime.today().date())
+            # basename = info_locker.base_info['BaseName']
+            file_saving_path = os.path.join(current_path, daily_folder)
+            if not os.path.exists(file_saving_path):
+                os.makedirs(file_saving_path)
+                print('Save files to {0}'.format(file_saving_path))
+
+            signoff_data_not_in_TOTALJOB.to_excel(os.path.join(file_saving_path,
+                                                               'Missed Trips in TotalJob but not in signoff-' +
+                                                               str(datetime.today().date()) +
+                                                               str(datetime.now().time().strftime("%H%M%S")) + '.xlsx'),
+                                                  index=False)
+
+        # Change "CALL" in pickup or dropoff time
+        delta_time = timedelta(minutes=45)
+        unique_invoice_in_signoff = signoff_df['INVOICE ID'].unique().tolist()
+
+        for invoice_num in unique_invoice_in_signoff:
+            idx = signoff_df.loc[signoff_df['INVOICE ID'] == invoice_num].index.tolist()
+            leg_id = [signoff_df.ix[i, 'LEG ID'] for i in idx]
+            leg_id.sort()
+
+            sorted_idx = [signoff_df.loc[signoff_df['LEG ID'] == l].index[0] for l in leg_id]
+
+            for index, i in enumerate(sorted_idx):
+                if signoff_df.ix[i, 'PICK UP TIME'] == 'CA:LL' and index != 0:
+                    last_row_idx = sorted_idx[index - 1]
+                    last_row_dropoff_time = signoff_df.ix[last_row_idx, 'DROP OFF TIME']
+                    temp_last_dropoff_time = datetime.strptime(last_row_dropoff_time, '%H:%M').time()
+                    temp_last_dropoff_time_date = datetime.combine(datetime.today().date(), temp_last_dropoff_time)
+                    new_pickup_time = datetime.combine(datetime.today().date(), temp_last_dropoff_time) + delta_time
+                    new_dropoff_time = new_pickup_time + delta_time
+
+                    if temp_last_dropoff_time_date.date() == new_pickup_time.date():
+                        signoff_df.ix[i, 'PICK UP TIME'] = new_pickup_time.strftime('%H:%M')
+                        signoff_df.ix[i, 'DROP OFF TIME'] = new_dropoff_time.strftime('%H:%M')
+                    else:
+                        pass
+
+        # Missed trips merge to sign off
+        missed_trip_concat_to_signoff_df = pd.DataFrame()
+        missed_trip_concat_to_signoff_df['SERVICE DAY'] = signoff_data_not_in_TOTALJOB['ServiceDate']
+        missed_trip_concat_to_signoff_df['INVOICE ID'] = signoff_data_not_in_TOTALJOB['TripID']
+        missed_trip_concat_to_signoff_df['LEG ID'] = "NA"
+        missed_trip_concat_to_signoff_df['PROCEDURE CODE'] = "NA"
+        missed_trip_concat_to_signoff_df['TRIP MILEAGE'] = "NA"
+        missed_trip_concat_to_signoff_df['PICK UP ADDRESS'] = "NA"
+        missed_trip_concat_to_signoff_df['PICK UP CITY'] = "NA"
+        missed_trip_concat_to_signoff_df['PICK UP ZIPCODE'] = "NA"
+        missed_trip_concat_to_signoff_df['DROP OFF ADDRESS'] = "NA"
+        missed_trip_concat_to_signoff_df['DROP OFF CITY'] = "NA"
+        missed_trip_concat_to_signoff_df['DROP OFF ZIPCODE'] = "NA"
+        missed_trip_concat_to_signoff_df['PICK UP TIME'] = "NA"
+        missed_trip_concat_to_signoff_df['DROP OFF TIME'] = "NA"
+        missed_trip_concat_to_signoff_df['DRIVER ID'] = signoff_data_not_in_TOTALJOB['driver id']
+        missed_trip_concat_to_signoff_df['VEHICLE ID'] = signoff_data_not_in_TOTALJOB['vehicle id']
+        missed_trip_concat_to_signoff_df['LEG STATUS'] = "NA"
+        missed_trip_concat_to_signoff_df['CIN'] = "NA"
+
+        # Service date range
+        temp_df['service_date'] = mas_df['Service Starts'].apply(lambda x: datetime.strptime(x, '%m/%d/%Y').date())
+        self.min_service_date = min(temp_df['service_date'])
+        self.max_service_date = max(temp_df['service_date'])
+
+        # Finally clean sign off
+        signoff_df = signoff_df.sort_values(by='LEG STATUS')
+        signoff_df['INVOICE ID'] = signoff_df['INVOICE ID'].apply(lambda x: x[:-1])
+        signoff_df['CIN'] = mas_df['CIN']
+        signoff_df['NPI'] = mas_df['Ordering Provider ID']
+
+        # Merge
+        signoff_df = pd.concat([signoff_df, missed_trip_concat_to_signoff_df], 0)
+        signoff_df = signoff_df[['SERVICE DAY', 'INVOICE ID', 'LEG ID', 'TOLL FEE', 'PROCEDURE CODE',
+                                   'TRIP MILEAGE', 'PICK UP ADDRESS', 'PICK UP CITY', 'PICK UP ZIPCODE',
+                                   'DROP OFF ADDRESS', 'DROP OFF CITY', 'DROP OFF ZIPCODE', 'PICK UP TIME',
+                                   'DROP OFF TIME', 'DRIVER ID', 'VEHICLE ID', 'LEG STATUS', 'CIN', 'NPI']]
+
+        # Output file
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        # basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        signoff_df.to_excel(os.path.join(file_saving_path,
+                                         'MAS Sign-off-{0}-to-{1}.xlsx'.format(self.min_service_date, self.max_service_date)),
+                            index=False)
 
 
 if __name__ == '__main__':
@@ -600,7 +744,7 @@ if __name__ == '__main__':
     # codes, _ = p.generate_procedureCodes(df, mileage, pick_poly, drop_ploy)
     # print(",".join(codes))
 ####################
-    # p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
+    p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
     conn = sqlite3.connect('EDI.db')
 
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
@@ -609,5 +753,4 @@ if __name__ == '__main__':
     info_locker.driver_information = dict_driver_df if dict_driver_df else None
     # print(info_locker.driver_information)
 
-    # y = Signoff().signoff('./2018-05-16/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
-
+    # y = Signoff().signoff('/Users/keyuanwu/Desktop/MACBACKUP/Billing_EX_kw/2018-05-16/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
