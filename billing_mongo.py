@@ -291,6 +291,7 @@ class ProcedureCode_Rules():
     '''
     Methods for Code rules
     '''
+    pass
 
 
 class Sqlite_Methods():
@@ -337,6 +338,7 @@ class Sqlite_Methods():
         self.create_table_cache_address(table)
         self.cursor.execute(f'INSERT OR REPLACE INTO {table} (Address, Longitude, Latitude, PolygonIDs) VALUES ("{address}", "{lng}", "{lat}", "{poly_id}")')
         self.conn.commit()
+        self.cursor.close()
 
     def check_address_in_cache(self, table, address):
         '''
@@ -348,6 +350,7 @@ class Sqlite_Methods():
         self.create_table_cache_address(table)
         self.cursor.execute(f'SELECT Longitude, Latitude, PolygonIDs FROM {table} WHERE Address="{address}"')
         resp = self.cursor.fetchone()
+        self.cursor.close()
         return resp
 
 
@@ -435,6 +438,8 @@ class Process_MAS():
 
             procedureCodes, _ = self.P.generate_procedureCodes(Rule_df, mileage, pickup_polygonIDs, dropoff_polygonIDs)
 
+            procedureCodes = list(sorted(set(procedureCodes), key=procedureCodes.index))
+
             calculated_codes = ",".join(procedureCodes)
             raw_df.ix[i, 'Calculated Codes'] = calculated_codes
 
@@ -479,10 +484,10 @@ class Process_MAS():
 
 class Signoff():
     def __init__(self):
-        pass
+        self.sq = Sqlite_Methods('ProcedureCodes.db')
 
     def signoff(self, processedMAS, TotalJob):
-
+        print('LOADING FILES...PROGRESS 20%')
         signoff_df = pd.DataFrame()
         temp_df = pd.DataFrame()   #cache dataframe
 
@@ -497,11 +502,14 @@ class Signoff():
         else:
             mas_df = pd.read_excel(processedMAS)
 
+
+
         # Drop service type
         service_idx = mas_df.loc[mas_df['Record Type'] == 'Service'].index
         mas_df = mas_df.drop(mas_df.index[service_idx])
 
         # Add driver id and vehicle id to TOTAL JOBS
+        print("MATCHING DRIVERS' INFO...PROGRESS 40%")
         totalJob_df['driver id'] = totalJob_df['FleetNumber'].apply(lambda x: info_locker.driver_information[str(x)]['DRIVER_ID'])
         totalJob_df['vehicle id'] = totalJob_df['FleetNumber'].apply(lambda x:
                                                                      info_locker.driver_information[str(x)]['VEHICLE_ID'])
@@ -518,26 +526,38 @@ class Signoff():
             if idx_in_processedMAS.__len__() != 0:
                 calculated_codes_in_MAS = mas_df.ix[idx_in_processedMAS[0], 'Calculated Codes']
                 leg_mileage = D(mas_df.ix[idx_in_processedMAS[0], 'Leg Mileage'])
-                leg_mileage = D(format(float(leg_mileage), '.2f'))
+                leg_mileage = D(float(leg_mileage))
                 totalJob_df.ix[idx_in_totaljob[0], 'Codes'] = calculated_codes_in_MAS
 
                 for code in calculated_codes_in_MAS.split(','):
-                    if code == 'A0100':
-                        MAS_amount += D('25.95')
-                    elif code == 'A0100TN':
-                        MAS_amount += D('35')
-                    elif code == 'S0215':
-                        MAS_amount += D('3.21') * (leg_mileage - D(8.0))
-                    elif code == 'S0215TN':
-                        MAS_amount += D('2.25') * leg_mileage
-                    elif code == 'A0100SC':
-                        MAS_amount += D('25')
+                    self.sq.cursor.execute(f'SELECT Mileage_Start, Price, Calculation_Type FROM Rule WHERE CodeName="{code}"')
+                    response = self.sq.cursor.fetchone()
+
+                    if response != None:
+                        MAS_amount += D(response[1]) if response[2] == "FLAT" else D(response[1]) * (leg_mileage - D(response[0]))
+
                     else:
-                        MAS_amount += D('0')
+                        print(f'HOUSTON! WE ARE FACING A TOTALLY NEW CODE {code} HERE!')
+                    # print(response[0], response[1])
+
+                    # if code == 'A0100':
+                    #     MAS_amount += D('25.95')
+                    # elif code == 'A0100TN':
+                    #     MAS_amount += D('35')
+                    # elif code == 'S0215':
+                    #     MAS_amount += D('3.21') * (leg_mileage - D(8.0))
+                    # elif code == 'S0215TN':
+                    #     MAS_amount += D('2.25') * leg_mileage
+                    # elif code == 'A0100SC':
+                    #     MAS_amount += D('25')
+                    # else:
+                    #     MAS_amount += D('0')
 
                 MAS_amount = math.floor(float(MAS_amount) * 100) / 100.
                 totalJob_df.ix[idx_in_totaljob[0], 'MAS amount'] = MAS_amount
                 totalJob_df.ix[idx_in_totaljob[0], 'Difference'] = math.floor((MAS_amount - float(totalJob_df.ix[idx_in_totaljob[0], 'Amount'])) * 100) / 100.
+
+        self.sq.cursor.close()
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
@@ -605,6 +625,7 @@ class Signoff():
             return result
 
         # Create sign off
+        print("PREPARING SIGN-OFF...PROGRESS 60%")
 
         signoff_df['SERVICE DAY'] = mas_df['Service Starts']
         signoff_df['INVOICE ID'] = mas_df['Invoice Number']
@@ -634,7 +655,10 @@ class Signoff():
         # output any missed trips in TOTAL JOB but not in SIGNOFF
 
         signoff_data_not_in_TOTALJOB = totalJob_df[~totalJob_df['TripID'].isin(signoff_df['INVOICE ID'])]
+        missed_trip_concat_to_signoff_df = pd.DataFrame()
+
         if signoff_data_not_in_TOTALJOB.__len__() != 0:
+            print("SOME MISSING TRIPS FOUND! GENERATING REPORTS...")
             current_path = os.getcwd()
             daily_folder = str(datetime.today().date())
             # basename = info_locker.base_info['BaseName']
@@ -643,6 +667,26 @@ class Signoff():
                 os.makedirs(file_saving_path)
                 print('Save files to {0}'.format(file_saving_path))
 
+            # Missed trips merge to sign off
+            missed_trip_concat_to_signoff_df['SERVICE DAY'] = signoff_data_not_in_TOTALJOB['ServiceDate']
+            missed_trip_concat_to_signoff_df['INVOICE ID'] = signoff_data_not_in_TOTALJOB['TripID']
+            missed_trip_concat_to_signoff_df['LEG ID'] = "NA"
+            missed_trip_concat_to_signoff_df['PROCEDURE CODE'] = "NA"
+            missed_trip_concat_to_signoff_df['TRIP MILEAGE'] = "NA"
+            missed_trip_concat_to_signoff_df['PICK UP ADDRESS'] = "NA"
+            missed_trip_concat_to_signoff_df['PICK UP CITY'] = "NA"
+            missed_trip_concat_to_signoff_df['PICK UP ZIPCODE'] = "NA"
+            missed_trip_concat_to_signoff_df['DROP OFF ADDRESS'] = "NA"
+            missed_trip_concat_to_signoff_df['DROP OFF CITY'] = "NA"
+            missed_trip_concat_to_signoff_df['DROP OFF ZIPCODE'] = "NA"
+            missed_trip_concat_to_signoff_df['PICK UP TIME'] = "NA"
+            missed_trip_concat_to_signoff_df['DROP OFF TIME'] = "NA"
+            missed_trip_concat_to_signoff_df['DRIVER ID'] = signoff_data_not_in_TOTALJOB['driver id']
+            missed_trip_concat_to_signoff_df['VEHICLE ID'] = signoff_data_not_in_TOTALJOB['vehicle id']
+            missed_trip_concat_to_signoff_df['LEG STATUS'] = "NA"
+            missed_trip_concat_to_signoff_df['CIN'] = "NA"
+            missed_trip_concat_to_signoff_df['NPI'] = "NA"
+
             signoff_data_not_in_TOTALJOB.to_excel(os.path.join(file_saving_path,
                                                                'Missed Trips in TotalJob but not in signoff-' +
                                                                str(datetime.today().date()) +
@@ -650,6 +694,7 @@ class Signoff():
                                                   index=False)
 
         # Change "CALL" in pickup or dropoff time
+        print('CLEANING SIGN-OFF FILE...PROGRESS 80%')
         delta_time = timedelta(minutes=45)
         unique_invoice_in_signoff = signoff_df['INVOICE ID'].unique().tolist()
 
@@ -675,26 +720,6 @@ class Signoff():
                     else:
                         pass
 
-        # Missed trips merge to sign off
-        missed_trip_concat_to_signoff_df = pd.DataFrame()
-        missed_trip_concat_to_signoff_df['SERVICE DAY'] = signoff_data_not_in_TOTALJOB['ServiceDate']
-        missed_trip_concat_to_signoff_df['INVOICE ID'] = signoff_data_not_in_TOTALJOB['TripID']
-        missed_trip_concat_to_signoff_df['LEG ID'] = "NA"
-        missed_trip_concat_to_signoff_df['PROCEDURE CODE'] = "NA"
-        missed_trip_concat_to_signoff_df['TRIP MILEAGE'] = "NA"
-        missed_trip_concat_to_signoff_df['PICK UP ADDRESS'] = "NA"
-        missed_trip_concat_to_signoff_df['PICK UP CITY'] = "NA"
-        missed_trip_concat_to_signoff_df['PICK UP ZIPCODE'] = "NA"
-        missed_trip_concat_to_signoff_df['DROP OFF ADDRESS'] = "NA"
-        missed_trip_concat_to_signoff_df['DROP OFF CITY'] = "NA"
-        missed_trip_concat_to_signoff_df['DROP OFF ZIPCODE'] = "NA"
-        missed_trip_concat_to_signoff_df['PICK UP TIME'] = "NA"
-        missed_trip_concat_to_signoff_df['DROP OFF TIME'] = "NA"
-        missed_trip_concat_to_signoff_df['DRIVER ID'] = signoff_data_not_in_TOTALJOB['driver id']
-        missed_trip_concat_to_signoff_df['VEHICLE ID'] = signoff_data_not_in_TOTALJOB['vehicle id']
-        missed_trip_concat_to_signoff_df['LEG STATUS'] = "NA"
-        missed_trip_concat_to_signoff_df['CIN'] = "NA"
-
         # Service date range
         temp_df['service_date'] = mas_df['Service Starts'].apply(lambda x: datetime.strptime(x, '%m/%d/%Y').date())
         self.min_service_date = min(temp_df['service_date'])
@@ -707,6 +732,7 @@ class Signoff():
         signoff_df['NPI'] = mas_df['Ordering Provider ID']
 
         # Merge
+        print("GENERATING SIGN-OFF...PROGRESS 90%")
         signoff_df = pd.concat([signoff_df, missed_trip_concat_to_signoff_df], 0)
         signoff_df = signoff_df[['SERVICE DAY', 'INVOICE ID', 'LEG ID', 'TOLL FEE', 'PROCEDURE CODE',
                                    'TRIP MILEAGE', 'PICK UP ADDRESS', 'PICK UP CITY', 'PICK UP ZIPCODE',
@@ -725,15 +751,76 @@ class Signoff():
         signoff_df.to_excel(os.path.join(file_saving_path,
                                          'MAS Sign-off-{0}-to-{1}.xlsx'.format(self.min_service_date, self.max_service_date)),
                             index=False)
+        print("SIGN-OFF FILE GENERATED!")
+
+
+class Compare_Signoff_PA():
+    def __init__(self, signoff, PA, Processed_MAS=None):
+        self.signoff_df = pd.read_excel(signoff)
+        self.PA_df = pd.read_table(PA)
+        if Processed_MAS:
+            self.MAS_df = pd.read_excel(Processed_MAS)
+
+        self.PA_df = self.PA_df.fillna("")
+        self.PA_df['Invoice Number'] = self.PA_df['Invoice Number'].astype(str)
+
+        self.signoff_df = self.signoff_df.loc[self.signoff_df['LEG STATUS'] == 0]
+
+    def compare_signoff_pa(self):
+        unique_invoice_number_in_signoff = self.signoff_df['INVOICE ID'].unique().tolist()
+
+        # Arguments
+        missed_trips = []   # Trips in signoff but not in PA
+        invoice_number_to_output = []
+        PA_number = []
+        service_NPI = []
+        PA_code_list = []
+        service_data_list = []
+        CIN_list = []
+        driver_id = []
+        vehicle_id = []
+
+        for invoice_number in unique_invoice_number_in_signoff:
+            PA_code_dict = {}
+            idx_PA = self.PA_df.loc[self.PA_df['Invoice Number'] == str(invoice_number)].index.tolist()
+            if len(idx_PA) == 0:
+                missed_trips.append(invoice_number)
+
+            else:
+                invoice_number_to_output.append(invoice_number)
+                PA_number.append(self.PA_df.ix[idx_PA[0], 'Prior Approval Number'])
+                service_NPI.append(self.PA_df.ix[idx_PA[0], 'Ordering Provider'])
+
+                for i in idx_PA:
+                    code = self.PA_df.ix[i, 'Item Code'] + self.PA_df.ix[i, 'Item Code Mod']
+                    unit = self.PA_df.ix[i, 'Qty']
+                    PA_code_dict[code] = unit
+                PA_code_list.append(str(PA_code_dict))
+
+                # process signoff data
+
+                idx_signoff = self.signoff_df.loc[self.signoff_df['INVOICE ID'] == invoice_number].index.tolist()
+                service_data_list.append(self.signoff_df.ix[idx_signoff[0], 'SERVICE DAY'])
+                CIN_list.append(self.signoff_df.ix[idx_signoff[0], 'CIN'])
+                driver_id.append(self.signoff_df.ix[idx_signoff[0], 'DRIVER ID'])
+                vehicle_id.append(self.signoff_df.ix[idx_signoff[0], 'VEHICLE ID'])
+
+
+
+
+
+
+
+
 
 
 if __name__ == '__main__':
 
     # sq = Sqlite_Methods('ProcedureCodes.db')
     #
-    # mileage = 18
-    # pick_address = '287 Grand St, New York, NY 10002'
-    # drop_address = '130-30 31st Ave, Flushing, NY 11354'
+    # mileage = 20.9
+    # pick_address = '25 PINE ST, New York, NY 10005'
+    # drop_address = '430 LAKEVILLE RD, New York, NY 11042'
     #
     # p = Process_Methods()
     # df = sq.get_procedureCode_Rule_to_df('Rule')
@@ -742,15 +829,20 @@ if __name__ == '__main__':
     # drop_ploy = p.getPolygonIDs(drop_address)
     #
     # codes, _ = p.generate_procedureCodes(df, mileage, pick_poly, drop_ploy)
-    # print(",".join(codes))
+    # print(codes)
+    # print(sorted(set(codes), key=codes.index))
+    # print(",".join(list(set(codes))))
 ####################
-    p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
-    conn = sqlite3.connect('EDI.db')
+    # p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
 
+    conn = sqlite3.connect('EDI.db')
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
     driver_df.set_index(['Fleet'], inplace=True)
     dict_driver_df = driver_df.to_dict('index')
     info_locker.driver_information = dict_driver_df if dict_driver_df else None
     # print(info_locker.driver_information)
 
-    # y = Signoff().signoff('/Users/keyuanwu/Desktop/MACBACKUP/Billing_EX_kw/2018-05-16/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
+    y = Signoff().signoff('./2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
+
+    # c = Compare_Signoff_PA('./2018-05-17/MAS Sign-off-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Roster-Export-2018-05-07-09-53-47.txt')
+    # c.compare_signoff_pa()
