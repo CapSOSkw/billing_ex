@@ -135,22 +135,7 @@ class P():
 def test2(address):
     return address
 
-import re
-def complexNumberMultiply(a, b):
-    """
-    :type a: str
-    :type b: str
-    :rtype: str
-    """
-    a_num = tuple(map(int, re.findall(r'\-?\d+', a)))
-    b_num = tuple(map(int, re.findall(r'\-?\d+', b)))
+import arrow
 
-    a1, b1 = a_num
-    a2, b2 = b_num
-
-    real_part = a1 * a1 - b1 * b2
-    complex_part = a1 * b2 + b1 * a2
-    return "{0}+{1}i".format(real_part, complex_part)
-
-
-print(complexNumberMultiply("1+-1i", "0+0i"))
+utc = arrow.utcnow().to('local')
+utc.shift()

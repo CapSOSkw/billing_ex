@@ -26,6 +26,8 @@ import urllib.parse
 from pymongo import MongoClient
 from decimal import Decimal as D
 from functools import wraps
+from ast import literal_eval
+from collections import Counter, OrderedDict
 
 
 def CleanAddress(func):
@@ -57,6 +59,7 @@ def CleanAddress(func):
     def wrapper(*args):
         return func(clean_address(*args))
     return wrapper
+
 
 def Google(func):
     def Google2Geo(address):
@@ -165,11 +168,13 @@ class Process_Methods():
     @staticmethod
     @CleanAddress
     def clean_address(address):
+        '''Clean address by removing noise and unwanted information'''
         return address
 
     @staticmethod
     @Google
     def google_address(address):
+        '''Use google geocoding API to get address geo-location'''
         return address
 
     @staticmethod
@@ -199,7 +204,7 @@ class Process_Methods():
     @staticmethod
     def generate_procedureCodes(dataframe, mileage, pickup_poly, dropoff_poly, **kwargs):
         '''
-
+        Base on database to generate cooresponding codes
         :param dataframe: Commonly call from 'get_procedureCode_Rule_to_df()'
         :param kwargs: mileage, pickup_polygonIDs, dropoff_polygonIDs, etc.
         :return: 1. A list, the codes should be used in this trip.
@@ -244,6 +249,14 @@ class Process_Methods():
             }
 
         return result, res_to_dict
+
+    @staticmethod
+    def use_driver_id_to_find_drivername(driverid):
+
+        for key, value in info_locker.driver_information.items():
+
+            if value['DRIVER_ID'] == driverid:
+                return value['FirstName'], value['LastName']
 
 
 class MongoDB_Methods():
@@ -429,10 +442,8 @@ class Process_MAS():
 
         for i in leg_idx:
             processed_pickup_address = raw_df.ix[i, 'processed_pickup_address']
-
             processed_dropoff_address = raw_df.ix[i, 'processed_dropoff_address']
             mileage = float(raw_df.ix[i, 'Leg Mileage'])
-
             pickup_polygonIDs = self.P.getPolygonIDs(processed_pickup_address)
             dropoff_polygonIDs = self.P.getPolygonIDs(processed_dropoff_address)
 
@@ -765,9 +776,12 @@ class Compare_Signoff_PA():
         self.PA_df['Invoice Number'] = self.PA_df['Invoice Number'].astype(str)
 
         self.signoff_df = self.signoff_df.loc[self.signoff_df['LEG STATUS'] == 0]
+        self.sq = Sqlite_Methods('ProcedureCodes.db')
 
     def compare_signoff_pa(self):
         unique_invoice_number_in_signoff = self.signoff_df['INVOICE ID'].unique().tolist()
+
+        missed_trips_df = pd.DataFrame()
 
         # Arguments
         missed_trips = []   # Trips in signoff but not in PA
@@ -779,13 +793,16 @@ class Compare_Signoff_PA():
         CIN_list = []
         driver_id = []
         vehicle_id = []
+        signoff_code_list = []
+        signoff_amount_no_tollfee = []
+        signoff_tollfee_list = []
 
         for invoice_number in unique_invoice_number_in_signoff:
             PA_code_dict = {}
             idx_PA = self.PA_df.loc[self.PA_df['Invoice Number'] == str(invoice_number)].index.tolist()
+
             if len(idx_PA) == 0:
                 missed_trips.append(invoice_number)
-
             else:
                 invoice_number_to_output.append(invoice_number)
                 PA_number.append(self.PA_df.ix[idx_PA[0], 'Prior Approval Number'])
@@ -794,10 +811,14 @@ class Compare_Signoff_PA():
                 for i in idx_PA:
                     code = self.PA_df.ix[i, 'Item Code'] + self.PA_df.ix[i, 'Item Code Mod']
                     unit = self.PA_df.ix[i, 'Qty']
-                    PA_code_dict[code] = unit
+                    if code != "A0170CG":
+                        PA_code_dict[code] = unit
+                    else:
+                        pass
+                # print(PA_code_dict, invoice_number)
                 PA_code_list.append(str(PA_code_dict))
 
-                # process signoff data
+                # process sign off data
 
                 idx_signoff = self.signoff_df.loc[self.signoff_df['INVOICE ID'] == invoice_number].index.tolist()
                 service_data_list.append(self.signoff_df.ix[idx_signoff[0], 'SERVICE DAY'])
@@ -805,12 +826,227 @@ class Compare_Signoff_PA():
                 driver_id.append(self.signoff_df.ix[idx_signoff[0], 'DRIVER ID'])
                 vehicle_id.append(self.signoff_df.ix[idx_signoff[0], 'VEHICLE ID'])
 
+                signoff_amount_without_tollfee = 0
+                counter_signoff_codes = Counter()
+                signoff_tollfee = []
+
+                for i in idx_signoff:
+                    signoff_codes = self.signoff_df.ix[i, 'PROCEDURE CODE']
+                    signoff_mile = self.signoff_df.ix[i, 'TRIP MILEAGE']
+                    signoff_tollfee.append(self.signoff_df.ix[i, 'TOLL FEE'])
+
+                    splited_signoff_codes = [code for code in signoff_codes.split(",")]
+                    temp_counter_dict = dict(Counter(splited_signoff_codes))
+
+                    for c in splited_signoff_codes:
+                        self.sq.cursor.execute(f'SELECT Mileage_Start, Calculation_Type FROM Rule WHERE CodeName="{c}"')
+                        response = self.sq.cursor.fetchone()
+
+                        if response[1] == 'UNIT':
+                            temp_counter_dict[c] = float(format(float(D(signoff_mile - response[0])), '.2f'))
+                        else:
+                            pass
+
+                    counter_signoff_codes += Counter(temp_counter_dict)
+                    counter_signoff_codes = dict(counter_signoff_codes)
+                    for key, value in counter_signoff_codes.items():
+                        counter_signoff_codes[key] = float(format(value, '.2f'))
+                    counter_signoff_codes = Counter(counter_signoff_codes)
+
+                # Calculate amount without toll fee
+                for key, value in dict(counter_signoff_codes).items():
+                    self.sq.cursor.execute(f'SELECT Price FROM Rule WHERE CodeName="{key}"')
+                    resp = self.sq.cursor.fetchone()
+                    if resp != None:
+
+                        signoff_amount_without_tollfee += math.floor(float(format(value * resp[0] * 100, '.2f'))) / 100.
 
 
+                signoff_amount_without_tollfee = math.floor(float(format(signoff_amount_without_tollfee * 100, '.2f'))) / 100.
+                signoff_amount_no_tollfee.append(signoff_amount_without_tollfee)
+
+                signoff_code_list.append(str(dict(counter_signoff_codes)))
+                signoff_tollfee_list.append(sum(signoff_tollfee))
 
 
+        missed_trips_df['MISSED TRIPS'] = missed_trips
+        correction_df = pd.DataFrame()
+        correction_df['Service Date'] = service_data_list
+        correction_df['Invoice Number'] = invoice_number_to_output
+        correction_df['CIN'] = CIN_list
+        correction_df['PA Number'] = PA_number
+        correction_df['Driver ID'] = driver_id
+        correction_df['Vehicle ID'] = vehicle_id
+        correction_df['Service NPI'] = service_NPI
+        correction_df['Encode PA'] = PA_code_list
+        correction_df['Encode Signoff'] = signoff_code_list
+        correction_df['Comparison'] = np.where(correction_df['Encode PA'].apply(lambda x: set(literal_eval(x).items())) -
+                                               correction_df['Encode Signoff'].apply(lambda x: set(literal_eval(x).items())) == set({}), "", 'Different')
 
+        correction_df['Signoff Amount Without Toll'] = signoff_amount_no_tollfee
+        correction_df['Signoff Tollfee'] = signoff_tollfee_list
+        correction_df['Signoff Total Amount'] = correction_df['Signoff Amount Without Toll'] + correction_df['Signoff Tollfee']
+        correction_df['Signoff Total Amount'] = correction_df['Signoff Total Amount'].apply(lambda x: float(format(x, '.2f')))
 
+        temp_df = pd.DataFrame()
+        temp_df['service_date'] = self.signoff_df['SERVICE DAY'].apply(lambda x: datetime.strptime(x, '%m/%d/%Y').date())
+
+        self.min_service_date = min(temp_df['service_date'])
+        self.max_service_date = max(temp_df['service_date'])
+
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        # basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        correction_df.to_excel(os.path.join(file_saving_path,
+                                            'MAS Correction-{0}-to-{1}.xlsx'.format(self.min_service_date, self.max_service_date)),
+                               index=False)
+
+        if missed_trips_df.__len__() != 0:
+            current_path = os.getcwd()
+            daily_folder = str(datetime.today().date())
+            # basename = info_locker.base_info['BaseName']
+            file_saving_path = os.path.join(current_path, daily_folder)
+            if not os.path.exists(file_saving_path):
+                os.makedirs(file_saving_path)
+                print('Save files to {0}'.format(file_saving_path))
+
+            missed_trips_df.to_excel(os.path.join(file_saving_path,
+                                              'MISSED TRIPS-{0}-to-{1}.xlsx'.format(self.min_service_date,
+                                                                                    self.max_service_date)),
+                                 index=False)
+
+        return correction_df
+
+    def EDI_837_excel(self):
+        self.correction_df = self.compare_signoff_pa()
+        correction_invoice_number = self.correction_df['Invoice Number'].tolist()
+
+        edi_837_dict = {}
+        for invoice_number in correction_invoice_number:
+            temp_dict = OrderedDict([
+                ('patient last name', ""),
+                ('patient first name', ""),
+                ('patient address', ""),
+                ('patient city', ""),
+                ('patient state', ""),
+                ('patient zip code', ""),
+                ('patient gender', ""),
+                ('patient pregnant', 'N'),
+                ('patient dob', ""),
+                ('patient medicaid number', ''),
+                ('invoice number', ''),
+                ('pa number', 0),
+                ('driver last name', ""),
+                ('driver first name', ""),
+                ('driver license number', ""),
+                ('driver plate number', ''),
+                ('service facility name', ""),
+                ('service address', ""),
+                ('service city', ""),
+                ('service state', ""),
+                ('service zip code', ""),
+                ('service date', ""),
+                ('service npi', 0),
+                ('claim_amount', 0),
+                ('service code 1', ""),
+                ('modifier code 1', ""),
+                ('amount 1', ""),
+                ('unit 1', ""),
+                ('service code 2', ""),
+                ('modifier code 2', ""),
+                ('amount 2', ""),
+                ('unit 2', ""),
+                ('service code 3', ""),
+                ('modifier code 3', ""),
+                ('amount 3', ""),
+                ('unit 3', ""),
+                ('service code 4', ""),
+                ('modifier code 4', ""),
+                ('amount 4', ""),
+                ('unit 4', ""),
+                ('service code 5', ""),
+                ('modifier code 5', ""),
+                ('amount 5', ""),
+                ('unit 5', ""),
+                ('service code 6', ""),
+                ('modifier code 6', ""),
+                ('amount 6', ""),
+                ('unit 6', ""),
+            ])
+
+            invoice_number_for_MAS = str(invoice_number) + 'A'
+
+            idx_MAS = self.MAS_df.loc[self.MAS_df['Invoice Number'] == invoice_number_for_MAS].index.tolist()
+            idx_correction = self.correction_df.loc[self.correction_df['Invoice Number'] == invoice_number].index.tolist()
+
+            temp_dict['patient last name'] = self.MAS_df.ix[idx_MAS[0], 'Last Name'].upper()
+            temp_dict['patient first name'] = self.MAS_df.ix[idx_MAS[0], 'First Name'].upper()
+            temp_dict['patient address'] = self.MAS_df.ix[idx_MAS[0], 'Pick-up Address']
+            temp_dict['patient city'] = self.MAS_df.ix[idx_MAS[0], 'Pick-up City'].upper()
+            temp_dict['patient state'] = self.MAS_df.ix[idx_MAS[0], 'Pick-up State']
+            temp_dict['patient zip code'] = str(self.MAS_df.ix[idx_MAS[0], 'Pick-up Zip'])
+            temp_dict['patient gender'] = self.MAS_df.ix[idx_MAS[0], 'Gender']
+            temp_dict['patient dob'] = self.MAS_df.ix[idx_MAS[0], 'Birthdate']
+            temp_dict['patient medicaid number'] = self.MAS_df.ix[idx_MAS[0], 'CIN']
+            temp_dict['invoice number'] = invoice_number
+            temp_dict['service facility name'] = self.MAS_df.ix[idx_MAS[0], 'Medical Provider'].replace(",", "").upper()
+            temp_dict['service address'] = self.MAS_df.ix[idx_MAS[0], 'Drop-off Address']
+            temp_dict['service city'] = self.MAS_df.ix[idx_MAS[0], 'Drop-off City'].upper()
+            temp_dict['service state'] = self.MAS_df.ix[idx_MAS[0], 'Drop-off State']
+            temp_dict['service zip code'] = str(self.MAS_df.ix[idx_MAS[0], 'Drop-off Zip'])
+            temp_dict['service date'] = self.MAS_df.ix[idx_MAS[0], 'Service Starts']
+            temp_dict['service npi'] = self.MAS_df.ix[idx_MAS[0], 'Ordering Provider ID']
+
+            temp_dict['pa number'] = int(re.findall(r'\d+', self.correction_df.ix[idx_correction[0], 'PA Number'])[0]) if re.findall(r'\d+', self.correction_df.ix[idx_correction[0], 'PA Number']).__len__() != 0 else 0
+            temp_dict['driver license number'] = int(self.correction_df.ix[idx_correction[0], 'Driver ID'])
+            temp_dict['driver plate number'] = self.correction_df.ix[idx_correction[0], 'Vehicle ID']
+            temp_dict['driver first name'], temp_dict['driver last name'] = Process_Methods.use_driver_id_to_find_drivername(int(self.correction_df.ix[idx_correction[0], 'Driver ID']))
+
+            code_dict = literal_eval(self.correction_df.ix[idx_correction[0], 'Encode Signoff'])
+
+            count = 1
+            for code, unit in code_dict.items():
+                self.sq.cursor.execute(f"SELECT Code, CodeModifier, Price FROM Rule WHERE CodeName='{code}'")
+                resp = self.sq.cursor.fetchone()
+                service_code = resp[0]
+                modifier = resp[1]
+                unit_price = D(resp[2])
+                amount = math.floor(float(format(D(unit) * unit_price * 100, '.2f'))) / 100.
+
+                self.code_position = f"service code {count}"
+                self.modifier_position = f"modifier code {count}"
+                self.amount_position = f"amount {count}"
+                self.unit_position = f"unit {count}"
+
+                temp_dict[self.code_position] = service_code
+                temp_dict[self.modifier_position] = modifier
+                temp_dict[self.amount_position] = amount
+                temp_dict[self.unit_position] = unit
+
+                count += 1
+
+            if self.correction_df.ix[idx_correction[0], 'Signoff Tollfee'] != 0:
+                self.code_position = f"service code {count}"
+                self.modifier_position = f"modifier code {count}"
+                self.amount_position = f"amount {count}"
+                self.unit_position = f"unit {count}"
+
+                temp_dict[self.code_position] = 'A0170'
+                temp_dict[self.modifier_position] = 'CG'
+                temp_dict[self.amount_position] = self.correction_df.ix[idx_correction[0], 'Signoff Tollfee']
+                temp_dict[self.unit_position] = 1
+
+            temp_dict['claim_amount'] = self.correction_df.ix[idx_correction[0], 'Signoff Total Amount']
+
+            edi_837_dict[str(invoice_number)] = temp_dict
+
+        edi_837_df = pd.DataFrame.from_dict(edi_837_dict, 'index')
+        edi_837_df.to_excel('837 test.xlsx', index=False)
 
 
 
@@ -842,7 +1078,8 @@ if __name__ == '__main__':
     info_locker.driver_information = dict_driver_df if dict_driver_df else None
     # print(info_locker.driver_information)
 
-    y = Signoff().signoff('./2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
+    # y = Signoff().signoff('./2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
 
-    # c = Compare_Signoff_PA('./2018-05-17/MAS Sign-off-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Roster-Export-2018-05-07-09-53-47.txt')
+    c = Compare_Signoff_PA('./2018-05-20/MAS Sign-off-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Roster-Export-2018-05-07-09-53-47.txt', './2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx')
     # c.compare_signoff_pa()
+    c.EDI_837_excel()
