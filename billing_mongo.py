@@ -208,7 +208,9 @@ class Process_Methods():
 
         else:
             lng, lat = Process_Methods.google_address(address)
+            # print(lng, lat)
             result = MongoDB_Methods(localhost=True).getPolygonID(lng=lng, lat=lat)
+            # print(result)
             process_result = ','.join(map(str, result))
             sq.upsert_address_cache('address_cache_test', address, lng, lat, process_result)
             print(f'HOUSTON! {address} IS RECORDED!')
@@ -230,6 +232,7 @@ class Process_Methods():
                 2. A dictionary type, contains code names and modifiers
         '''
 
+
         result = []
         res_to_dict = {}
         for r in range(len(dataframe)):
@@ -237,6 +240,7 @@ class Process_Methods():
             mileage_start = row['Mileage_Start']
             mileage_end = row['Mileage_End']
             pickup = row['polygonID_pickup']
+
             dropoff = row['polygonID_dropoff']
 
             Rule1 = mileage in Process_Methods().frange(mileage_start, mileage_end, 0.01) if mileage_end > 0 else mileage > mileage_start
@@ -762,8 +766,77 @@ class Process_Methods():
             edi837_df = pd.read_excel(edi837)
             edi837_df['invoice number'] = edi837_df['invoice number'].astype(str)
 
+        SQ = Sqlite_Methods('ProcedureCodes.db')
+
+        result_dict = {}
+        temp_dict = {}
+
+        invoice_num = ""
+        patient_lastname = ""
+        patient_firstname = ""
+        CIN = ""
+        total_expected_amt = ""
+        total_paid_amt = ""
+        claim_ctrl_num = ""
+        service_date = ""
+        embedded_code_dict = {}
+        comparsion_code = ""
+        error_codes = []
+        result = ''
+        status_code = ""
+        status_code2 = ""
+
+        for l in range(receipt_df.__len__()):
+            row = receipt_df.ix[l, 1]
+
+            if row[0] == 'BHT':
+                invoice_num = row[3]
+
+            elif row[0] == 'NM1' and row[1] == 'IL' and row[2] == '1':
+                patient_lastname = row[3]
+                patient_firstname = row[4]
+                CIN = row[9]
+
+            elif row[0] == 'TRN' and row[1] == '2':
+                next_row = receipt_df.ix[l + 1, 1]
+                total_expected_amt = float(next_row[4])
+                total_paid_amt = float(next_row[5])
+                status_code = next_row[1]
+
+                for code in status_code.split(":"):
+                    SQ.cursor.execute(f'SELECT description FROM X12_external_code WHERE Code="{code}"')
+                    resp = SQ.cursor.fetchone()
+                    if resp != None:
+                        description_status_code = f' -{resp[0]}'
+                    else:
+                        description_status_code = ""
 
 
+                if (abs(total_expected_amt - total_paid_amt) <= 0.02) and (total_expected_amt != 0):
+                    result = 'Paid'
+                elif total_paid_amt == 0:
+                    if total_expected_amt == 0:
+                        result = 'Error' + description_status_code
+                    else:
+                        result = 'Denied' + description_status_code
+                else:
+                    result = 'Partial Paid' + description_status_code
+
+            elif row[0] == 'REF' and row[1] == '1K':
+                claim_ctrl_num = row[2]
+
+            elif row[0] == 'DTP' and row[1] == '472' and row[2] == 'RD8':
+                service_date = row[3]
+
+            elif row[0] == 'SVC':
+                service_code = row[1]
+                expected_amount = float(row[2])
+                paid_amount = float(row[3])
+                service_code = "".join(service_code.split(":")[1:])
+                embedded_code_dict[service_code] = {'Expected': expected_amount,
+                                                    'Paid': paid_amount}
+                if expected_amount != paid_amount:
+                    error_codes.append(service_code)
 
 
 class MongoDB_Methods():
@@ -771,16 +844,18 @@ class MongoDB_Methods():
     Methods with MongoDB
     '''
     def __init__(self, localhost=False):
-        mongo_uri = "mongodb://root:" + urllib.parse.quote('0p8rr@Fruit') + '@192.168.130.62:27017/operr_v3_dev'
-        self.conn = MongoClient(mongo_uri)
-        self.db = self.conn.operr_v3_dev
-        self.mycollection = self.db.polygon_boundary_keyuan_copy
 
         if localhost == True:
             local_uri = "mongodb://127.0.0.1:27017"
             self.conn = MongoClient(local_uri)
             self.db = self.conn.polygon
-            self.mycollection = self.db.polygon_local
+            self.mycollection = self.db.ali_polygon
+
+        else:
+            mongo_uri = "mongodb://root:" + urllib.parse.quote('0p8rr@Fruit') + '@192.168.130.62:27017/operr_v3_dev'
+            self.conn = MongoClient(mongo_uri)
+            self.db = self.conn.operr_v3_dev
+            self.mycollection = self.db.polygon_boundary_keyuan_copy
 
     def getPolygonID(self, lng, lat):
         '''
@@ -789,6 +864,7 @@ class MongoDB_Methods():
         :param lat:
         :return: Return all polygonIDs containing this geo point, list type
         '''
+        # t1 = time.time()
         response = self.mycollection.find(
             {
                 'boundary': {
@@ -803,7 +879,8 @@ class MongoDB_Methods():
         )
 
         result = [i['polygonId'] for i in response]
-        self.conn.close()
+        # self.conn.close()
+        # print(time.time() - t1)
         return result
 
 
@@ -858,7 +935,7 @@ class Sqlite_Methods():
         self.create_table_cache_address(table)
         self.cursor.execute(f'INSERT OR REPLACE INTO {table} (Address, Longitude, Latitude, PolygonIDs) VALUES ("{address}", "{lng}", "{lat}", "{poly_id}")')
         self.conn.commit()
-        self.cursor.close()
+        # self.cursor.close()
 
     def check_address_in_cache(self, table, address):
         '''
@@ -870,7 +947,7 @@ class Sqlite_Methods():
         self.create_table_cache_address(table)
         self.cursor.execute(f'SELECT Longitude, Latitude, PolygonIDs FROM {table} WHERE Address="{address}"')
         resp = self.cursor.fetchone()
-        self.cursor.close()
+        # self.cursor.close()
         return resp
 
     def IfplancodeInDB(self, table, plancode):
@@ -981,6 +1058,14 @@ class Sqlite_Methods():
                 print('Save files to {0}'.format(file_saving_path))
             df.to_excel('Manually Checking Lib-' + str(date) + '.xlsx', index=False)
         return df
+
+    def create_table_x12_external_code(self, table):
+        self.cursor.execute(f'CREATE TABLE IF NOT EXISTS {table}(Code TEXT, Description TEXT, PRIMARY KEY(Code))')
+
+    def upsert_x12_external_code(self, table, code, description):
+        self.create_table_x12_external_code(table)
+        self.cursor.execute(f'INSERT OR REPLACE INTO {table} (Code, Description) VALUES ("{code}", "{description}")')
+        self.conn.commit()
 
 
 class Process_MAS():
@@ -2349,23 +2434,23 @@ class EDI276():
 if __name__ == '__main__':
 
     # sq = Sqlite_Methods('ProcedureCodes.db')
-    #
+    # # #
     # mileage = 20.9
     # pick_address = '25 PINE ST, New York, NY 10005'
     # drop_address = '430 LAKEVILLE RD, New York, NY 11042'
-    #
+    # # #
     # p = Process_Methods()
     # df = sq.get_procedureCode_Rule_to_df('Rule')
-    #
+    # # #
     # pick_poly = p.getPolygonIDs(pick_address)
     # drop_ploy = p.getPolygonIDs(drop_address)
-    #
+    # # #
     # codes, _ = p.generate_procedureCodes(df, mileage, pick_poly, drop_ploy)
     # print(codes)
     # print(sorted(set(codes), key=codes.index))
     # print(",".join(list(set(codes))))
 ####################
-    # p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
+    p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
 
     conn = sqlite3.connect('EDI.db')
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
@@ -2386,4 +2471,5 @@ if __name__ == '__main__':
     # c.EDI_837_excel()
     # Process_Methods.generate_837('837 test.xlsx', delay_claim=False)
     # Process_Methods.generate_270('MASRawVendor-31226-2018-03-28-11-06-36.txt')
-    Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
+    # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
+    # Process_Methods.process_276_receipt('R180525165538.090001.x12')
