@@ -240,7 +240,6 @@ class Process_Methods():
             mileage_start = row['Mileage_Start']
             mileage_end = row['Mileage_End']
             pickup = row['polygonID_pickup']
-
             dropoff = row['polygonID_dropoff']
 
             Rule1 = mileage in Process_Methods().frange(mileage_start, mileage_end, 0.01) if mileage_end > 0 else mileage > mileage_start
@@ -285,6 +284,19 @@ class Process_Methods():
     def write_to_txt(data, output_file):
         with open(output_file, 'w') as f:
             f.write(data)
+
+    @staticmethod
+    def df2txt(input_file, output_name, delimiter='\t', fmt='%s'):
+        if isinstance(input_file, pd.DataFrame):
+            df = input_file
+        elif input_file.endswith('xlsx'):
+            df = pd.read_excel(input_file)
+        elif input_file.endswith('csv'):
+            df = pd.read_csv(input_file)
+        else:
+            raise TypeError(f'The type of file: {input_file} is not supported! \n     Only support ".xlsx", ".csv" & "dataframe"!')
+
+        np.savetxt(output_name, df, delimiter=delimiter, fmt=fmt)
 
     @staticmethod
     def generate_837(file, delay_claim):
@@ -780,7 +792,7 @@ class Process_Methods():
         claim_ctrl_num = ""
         service_date = ""
         embedded_code_dict = {}
-        comparsion_code = ""
+        description = []
         error_codes = []
         result = ''
         status_code = ""
@@ -807,7 +819,7 @@ class Process_Methods():
                     SQ.cursor.execute(f'SELECT description FROM X12_external_code WHERE Code="{code}"')
                     resp = SQ.cursor.fetchone()
                     if resp != None:
-                        description_status_code = f' -{resp[0]}'
+                        description_status_code = f' -{resp[0]}; '
                     else:
                         description_status_code = ""
 
@@ -820,7 +832,7 @@ class Process_Methods():
                     else:
                         result = 'Denied' + description_status_code
                 else:
-                    result = 'Partial Paid' + description_status_code
+                    result = 'Partial Paid ' + description_status_code
 
             elif row[0] == 'REF' and row[1] == '1K':
                 claim_ctrl_num = row[2]
@@ -837,6 +849,107 @@ class Process_Methods():
                                                     'Paid': paid_amount}
                 if expected_amount != paid_amount:
                     error_codes.append(service_code)
+
+                next_row = receipt_df.ix[l+1, 1]
+                status_code2 = next_row[1]
+
+                temp_description = []
+                for code in status_code2.split(":"):
+                    SQ.cursor.execute(f'SELECT description FROM X12_external_code WHERE Code="{code}"')
+                    resp = SQ.cursor.fetchone()
+                    if resp != None:
+                        temp_description.append(resp[0])
+                description += temp_description
+
+            if row[0] == 'SE':
+
+                description = list(set(description))
+                if description.__len__() != 0:
+                    result = result + '-' + '; '.join(description)
+
+                if error_codes.__len__() != 0:
+                    result += " (Wrong Codes: {0})".format(",".join(error_codes))
+
+                if edi837:
+                    npi_temp = edi837_df.loc[edi837_df['invoice number'] == invoice_num, 'service npi'].tolist()
+                    NPI = int(npi_temp[0]) if len(npi_temp) != 0 else 0
+
+                    driver_temp = edi837_df.loc[edi837_df['invoice number'] == invoice_num, 'driver license number'].tolist()
+                    Driver_id = int(driver_temp[0]) if len(driver_temp) != 0 else 0
+
+                    vehicle_temp = edi837_df.loc[edi837_df['invoice number'] == invoice_num, 'driver plate number'].tolist()
+                    Vehicle_id = vehicle_temp[0] if len(vehicle_temp) != 0 else ""
+
+                    claim_amount_temp = edi837_df.loc[
+                        edi837_df['invoice number'] == invoice_num, 'claim_amount'].tolist()
+                    claim_amount = float(claim_amount_temp[0]) if len(claim_amount_temp) != 0 else 0
+
+                    if total_paid_amt >= claim_amount:
+                        result = 'Paid'
+
+                    temp_dict[str(invoice_num)] = {
+                        'Invoice Number': invoice_num,
+                        'Patient Lastname': patient_lastname,
+                        'Patient Firstname': patient_firstname,
+                        'CIN': CIN,
+                        'Claim Ctrl Number': claim_ctrl_num,
+                        'P1 Total Expected Amt': claim_amount,
+                        'P2 Total Expected Amt': total_expected_amt,
+                        'Total Paid Amt': total_paid_amt,
+                        'Service Date': service_date,
+                        'Comparison Codes': str(embedded_code_dict),
+                        'Result': result,
+                        'NPI': NPI,
+                        'DRIVER ID': Driver_id,
+                        'VEHICLE ID': Vehicle_id
+                    }
+
+                else:
+                    temp_dict[str(invoice_num)] = {
+                        'Invoice Number': invoice_num,
+                        'Patient Lastname': patient_lastname,
+                        'Patient Firstname': patient_firstname,
+                        'CIN': CIN,
+                        'Claim Ctrl Number': claim_ctrl_num,
+                        'P2 Total Expected Amt': total_expected_amt,
+                        'Total Paid Amt': total_paid_amt,
+                        'Service Date': service_date,
+                        'Comparison Codes': str(embedded_code_dict),
+                        'Result': result,
+                    }
+
+                result_dict.update(temp_dict)
+
+                invoice_num = ""
+                patient_lastname = ""
+                patient_firstname = ""
+                CIN = ""
+                total_expected_amt = ""
+                total_paid_amt = ""
+                claim_ctrl_num = ""
+                service_date = ""
+                embedded_code_dict = {}
+                description = []
+                error_codes = []
+                result = ''
+                status_code = ""
+                status_code2 = ""
+
+        result_df = pd.DataFrame(result_dict)
+        result_df = result_df.transpose()
+        if edi837:
+            result_df = result_df[['Invoice Number', 'Result', 'P1 Total Expected Amt', 'P2 Total Expected Amt', 'Total Paid Amt', 'Comparison Codes',
+                               'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date', 'NPI', 'DRIVER ID', 'VEHICLE ID']]
+
+        else:
+            result_df = result_df[
+                ['Invoice Number', 'Result', 'P2 Total Expected Amt', 'Total Paid Amt',
+                 'Comparison Codes',
+                 'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date']]
+
+        file_name_276277 = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
+
+        result_df.to_excel('test276277.xlsx',index=False)
 
 
 class MongoDB_Methods():
@@ -2472,4 +2585,4 @@ if __name__ == '__main__':
     # Process_Methods.generate_837('837 test.xlsx', delay_claim=False)
     # Process_Methods.generate_270('MASRawVendor-31226-2018-03-28-11-06-36.txt')
     # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
-    # Process_Methods.process_276_receipt('R180525165538.090001.x12')
+    # Process_Methods.process_276_receipt('R180525165538.090001.x12', edi837='837P-1 Data-for-2018-04-30-to-2018-05-06 (1).xlsx')
