@@ -28,6 +28,7 @@ from decimal import Decimal as D
 from functools import wraps
 from ast import literal_eval
 from collections import Counter, OrderedDict
+import arrow
 
 
 def CleanAddress(func):
@@ -101,6 +102,24 @@ def Google(func):
 class info_locker(object):
 
     driver_information = None
+    base_info = None
+
+    NYSDOH = {
+        'name': 'NYSDOH',
+        'ETIN': 'EMEDNYBAT',
+        'id': '141797357',
+        'address': 'CORNING TOWER EMPIRE STATE PLAZA',
+        'city': 'ALBANY',
+        'state': 'NY',
+        'zipcode': '12237',
+
+    }
+
+    version_code = {
+        '837': '005010X222A1',
+        '276': '005010X212',
+        '270': '005010X279A1'
+    }
 
 
 class Process_Methods():
@@ -189,7 +208,9 @@ class Process_Methods():
 
         else:
             lng, lat = Process_Methods.google_address(address)
+            # print(lng, lat)
             result = MongoDB_Methods(localhost=True).getPolygonID(lng=lng, lat=lat)
+            # print(result)
             process_result = ','.join(map(str, result))
             sq.upsert_address_cache('address_cache_test', address, lng, lat, process_result)
             print(f'HOUSTON! {address} IS RECORDED!')
@@ -210,6 +231,7 @@ class Process_Methods():
         :return: 1. A list, the codes should be used in this trip.
                 2. A dictionary type, contains code names and modifiers
         '''
+
 
         result = []
         res_to_dict = {}
@@ -258,22 +280,695 @@ class Process_Methods():
             if value['DRIVER_ID'] == driverid:
                 return value['FirstName'], value['LastName']
 
+    @staticmethod
+    def write_to_txt(data, output_file):
+        with open(output_file, 'w') as f:
+            f.write(data)
+
+    @staticmethod
+    def df2txt(input_file, output_name, delimiter='\t', fmt='%s'):
+        if isinstance(input_file, pd.DataFrame):
+            df = input_file
+        elif input_file.endswith('xlsx'):
+            df = pd.read_excel(input_file)
+        elif input_file.endswith('csv'):
+            df = pd.read_csv(input_file)
+        else:
+            raise TypeError(f'The type of file: {input_file} is not supported! \n     Only support ".xlsx", ".csv" & "dataframe"!')
+
+        np.savetxt(output_name, df, delimiter=delimiter, fmt=fmt)
+
+    @staticmethod
+    def generate_837(file, delay_claim):
+        edi = EDI837P(file, delay_claim)
+        stream_837data = edi.ISA_IEA()
+        filename = edi.file_name + '.txt'
+
+        Process_Methods.write_to_txt(stream_837data, filename)
+
+    @staticmethod
+    def generate_270(MAS_raw_file):
+        raw_df = pd.read_table(MAS_raw_file) if MAS_raw_file.endswith('txt') else pd.read_csv(MAS_raw_file)
+
+        result_df = pd.DataFrame()
+        unique_invoice = raw_df["Invoice Number"].unique().tolist()
+        invoice_number_list = []
+        service_name = []
+        service_npi = []
+        client_lastname = []
+        client_firstname = []
+        CIN = []
+        gender = []
+        dob = []
+        service_date = []
+
+        for invoice_number in unique_invoice:
+            idx = raw_df.loc[
+                (raw_df['Invoice Number'] == invoice_number) & (raw_df['Record Type'] == 'Leg')].index.tolist()
+
+            invoice_number_list.append(invoice_number)
+            service_name.append(raw_df.ix[idx[0], 'Medical Provider'].upper())
+            service_npi.append(int(raw_df.ix[idx[0], 'Ordering Provider ID']))
+            client_lastname.append(raw_df.ix[idx[0], 'Last Name'].upper())
+            client_firstname.append(raw_df.ix[idx[0], 'First Name'].upper())
+            CIN.append(raw_df.ix[idx[0], 'CIN'])
+            gender.append(raw_df.ix[idx[0], 'Gender'])
+            dob.append(raw_df.ix[idx[0], 'Birthdate'])
+            service_date.append(raw_df.ix[idx[0], 'Service Starts'])
+
+        result_df['INVOICE NUMBER'] = invoice_number_list
+        result_df['SVC NAME'] = service_name
+        result_df['SVC NPI'] = service_npi
+        result_df['CLIENT LAST NAME'] = client_lastname
+        result_df['CLIENT FIRST NAME'] = client_firstname
+        result_df['MEDICAID ID NUMBER'] = CIN
+        result_df['GENDER'] = gender
+        result_df['DOB'] = dob
+        result_df['SVC DATE'] = service_date
+
+        result_df.to_excel('270-data-test.xlsx', index=False)
+
+        edi = EDI270(result_df)
+        stream_270_data = edi.ISA_IEA()
+        filename = edi.file_name
+
+        Process_Methods.write_to_txt(stream_270_data, filename)
+
+    @staticmethod
+    def process_271(receipt_file, lined_file=False):
+        SQ =Sqlite_Methods('EDI.db')  # connect to sqlite3
+
+        if lined_file == False:  # for raw receipt data
+            receipt_df = pd.read_csv(receipt_file, delimiter="~", header=None, )
+            receipt_df = receipt_df.transpose()
+            receipt_df.columns = ['line']
+            receipt_df['line'] = receipt_df['line'].dropna()
+        else:  # already split into lines
+            receipt_df = pd.read_csv(receipt_file)
+            receipt_df.columns = ['line']
+
+        receipt_df = receipt_df.dropna()
+        receipt_df['line_sep'] = receipt_df['line'].apply(lambda x: x.split("*"))
+        # print(receipt_df)
+
+        result_dict = {}
+        temp_dict = {}
+        invoice_num = ""
+        patient_lastname = ""
+        patient_firstname = ""
+        CIN = ""
+        dob = ""
+        gender = ""
+        service_date = ""
+        eligible_code = ""
+        payer_name = ""
+        plan_code = ""
+        address = ""
+        # contact_name = ""
+        contact_tel = ""
+        covered_service_codes = []
+        other_payer_name = []
+        other_payer_address = []
+        other_payer_policy_number = ""
+        other_payer_telephone = []
+        other_payer_group_number = []
+
+        other_payer_name1 = ""
+        other_payer_address1 = ""
+        other_payer_telephone1 = ""
+        other_payer_group_number1 = ""
+        other_payer_name2 = ""
+        other_payer_address2 = ""
+        other_payer_telephone2 = ""
+        other_payer_group_number2 = ""
+        eligible_result = ""
+
+        for l in range(receipt_df.__len__()):
+            row = receipt_df.ix[l, 1]
+
+            if row[0] == 'BHT':
+                invoice_num = row[3]
+
+            elif row[0] == 'AAA' and row[1] == 'N':
+                if row[3] == '15':
+                    eligible_code = 'Required Application Data Missing'
+                elif row[3] == '35':
+                    eligible_code = 'Out of Network'
+                elif row[3] == '42':
+                    eligible_code = 'Unable to respond at current time'
+                elif row[3] == '43':
+                    eligible_code = 'Invalid/missing provider ID'
+                elif row[3] == '45':
+                    eligible_code = 'Invalid/missing provider specialty'
+                elif row[3] == '47':
+                    eligible_code = 'Invalid/missing provider state'
+                elif row[3] == '48':
+                    eligible_code = 'Invalid/missing referring provider ID number'
+                elif row[3] == '49':
+                    eligible_code = 'Provider is not primary care physician'
+                elif row[3] == '51':
+                    eligible_code = 'Provider not on file'
+                elif row[3] == '52':
+                    eligible_code = 'Service dates not within provider plan enrollment'
+                elif row[3] == '56':
+                    eligible_code = 'Inappropriate date'
+                elif row[3] == '57':
+                    eligible_code = 'Invalid/missing date of service'
+                elif row[3] == '58':
+                    eligible_code = 'Invalid/missing date of birth'
+                elif row[3] == '60':
+                    eligible_code = 'Date of birth follows date of service'
+                elif row[3] == '61':
+                    eligible_code = 'Date of death precedes date of service'
+                elif row[3] == '62':
+                    eligible_code = 'Date of service not within allowable inquiry period'
+                elif row[3] == '63':
+                    eligible_code = 'date of service in future'
+                elif row[3] == '71':
+                    eligible_code = 'Patient date of birth does not match patient in database'
+                elif row[3] == '72':
+                    eligible_code = 'Invalid/missing subscriber/insured ID'
+                elif row[3] == '73':
+                    eligible_code = 'Invalid/missing subscriber/insured name'
+                elif row[3] == '74':
+                    eligible_code = 'Invalid/missing subscriber/insured gender code'
+                elif row[3] == '75':
+                    eligible_code = 'Subscriber/insurer not found'
+                elif row[3] == '76':
+                    eligible_code = 'Duplicate subscriber/insurer ID number'
+                elif row[3] == '78':
+                    eligible_code = 'Subscriber/insured not in group/plan identified'
+                else:
+                    eligible_code = "AAA"
+
+
+            elif row[0] == 'NM1' and row[1] == 'IL':
+                patient_lastname, patient_firstname, CIN = row[3], row[4], row[9]
+
+            elif row[0] == 'DMG' and row[1] == 'D8':
+                dob = row[2]
+                dob = datetime.strptime(dob, '%Y%m%d').date()
+                gender = row[3]
+
+            elif row[0] == 'DTP' and row[1] == '472':
+                service_date = row[3]
+                service_date = datetime.strptime(service_date, '%Y%m%d').date()
+
+            elif (row[0] == 'EB' and row[1] == 'U' and row[2] == 'IND' and row[3] == '30') or \
+                    (row[0] == 'EB' and row[1] == '1' and row[2] == 'IND' and row[3] == '30'):
+                eligible_code = row[5]
+
+            elif row[0] == 'EB' and row[1] == '6':
+                eligible_code = 'Inactive'
+
+            elif row[0] == 'NM1' and row[1] == 'Y2':
+                payer_name = row[3]
+                plan_code = row[9]
+
+                address_row1 = receipt_df.ix[l + 1, 1]  # N3
+                address_row2 = receipt_df.ix[l + 2, 1]  # N4
+                contact_row = receipt_df.ix[l + 3, 1]  # PER
+
+                address = address_row1[1] + " " + address_row2[1] + " " + address_row2[2] + " " + address_row2[3]
+                # contact_name = contact_row[2]
+                contact_tel = contact_row[4]
+
+            elif row[0] == 'NM1' and row[1] == 'P4':
+                other_payer_name.append(row[3])
+                try:
+                    other_payer_group_number.append(row[9])
+                except:
+                    other_payer_group_number.append("")
+
+                N3_row = receipt_df.ix[l + 1, 1]
+                N4_row = receipt_df.ix[l + 2, 1]
+                PER_row = receipt_df.ix[l + 3, 1]
+
+                if N3_row[0] == "N3" and N4_row[0] == "N4":
+                    other_payer_address.append(N3_row[1] + " " + N4_row[1] + " " + N4_row[2] + " " + N4_row[3])
+                    if PER_row[0] == 'PER' and PER_row[1] == 'IC':
+                        other_payer_tel_tmp = PER_row[4]
+                    else:
+                        other_payer_tel_tmp = "0"
+
+                    other_payer_telephone.append(other_payer_tel_tmp)
+                else:
+                    other_payer_address.append("")
+                    other_payer_telephone.append("")
+
+            elif row[0] == 'REF' and row[1] == '18':
+                other_payer_policy_number = row[2]
+
+            elif row[0] == 'EB' and row[1] == '1' and row[2] == 'IND':
+                covered_service_codes.append(str(row[3]))
+
+            if other_payer_name.__len__() == 1:
+                other_payer_name1 = other_payer_name[0]
+                other_payer_address1 = other_payer_address[0]
+                other_payer_telephone1 = other_payer_telephone[0]
+                other_payer_group_number1 = other_payer_group_number[0]
+
+            if other_payer_name.__len__() == 2:
+                other_payer_name2 = other_payer_name[1]
+                other_payer_address2 = other_payer_address[1]
+                other_payer_telephone2 = other_payer_telephone[1]
+                other_payer_group_number2 = other_payer_group_number[1]
+
+            temp_dict[str(invoice_num)] = {'Invoice number': invoice_num,
+                                           'Patient lastname': patient_lastname,
+                                           'Patient firstname': patient_firstname,
+                                           'Patient DOB': dob,
+                                           'Patient gender': gender,
+                                           'CIN': CIN,
+                                           'Service date': service_date,
+                                           'Eligible': eligible_code,
+                                           'Payer name': payer_name,
+                                           'Payer address': address,
+                                           # 'Contact name': contact_name,
+                                           'Contact Tel.': contact_tel,
+                                           'Plan code': plan_code,
+                                           'Covered Codes': str(covered_service_codes),
+
+                                           'Other Payer1 name': other_payer_name1,
+                                           'Other Payer1 address': other_payer_address1,
+                                           'Other Payer1 tel.': other_payer_telephone1,
+                                           'Other Payer1 group number': other_payer_group_number1,
+                                           'Other Payer2 name': other_payer_name2,
+                                           'Other Payer2 address': other_payer_address2,
+                                           'Other Payer2 tel.': other_payer_telephone2,
+                                           'Other Payer2 group number': other_payer_group_number2,
+                                           'Other Payer policy number': other_payer_policy_number,
+                                           }
+
+            if row[0] == 'SE':  # section ends
+                # print(temp_dict)
+
+                ifPlanCodeInDB = SQ.IfplancodeInDB(table='PlanCodeLib', plancode=plan_code)
+                if ifPlanCodeInDB:
+                    eligible_result = "OKAY"
+                elif eligible_code in ["ELIGIBLE PCP", "Community Coverage w/CBLTC",
+                                       "EP - Family Planning and Non Emerg Trans Only", 'MA Eligible',
+                                       'Eligible Only Outpatient Care', 'Community Coverage No LTC',
+                                       'Outpatient Coverage w/ CBLTC'] and ifPlanCodeInDB == False:
+                    eligible_result = "OKAY"
+                else:
+                    eligible_result = 'PENDING'
+
+                temp_dict[str(invoice_num)] = {'Invoice number': invoice_num,
+                                               'Eligibility Result': eligible_result,
+                                               'Patient lastname': patient_lastname,
+                                               'Patient firstname': patient_firstname,
+                                               'Patient DOB': dob,
+                                               'Patient gender': gender,
+                                               'CIN': CIN,
+                                               'Service date': service_date,
+                                               'Eligible': eligible_code,
+                                               'Payer name': payer_name,
+                                               'Payer address': address,
+                                               # 'Contact name': contact_name,
+                                               'Contact Tel.': contact_tel,
+                                               'Plan code': plan_code,
+                                               'Covered Codes': str(covered_service_codes),
+
+                                               'Other Payer1 name': other_payer_name1,
+                                               'Other Payer1 address': other_payer_address1,
+                                               'Other Payer1 tel.': other_payer_telephone1,
+                                               'Other Payer1 group number': other_payer_group_number1,
+                                               'Other Payer2 name': other_payer_name2,
+                                               'Other Payer2 address': other_payer_address2,
+                                               'Other Payer2 tel.': other_payer_telephone2,
+                                               'Other Payer2 group number': other_payer_group_number2,
+                                               'Other Payer policy number': other_payer_policy_number,
+                                               }
+
+                result_dict.update(temp_dict)
+                # Reset var.
+                invoice_num = ""
+                patient_lastname = ""
+                patient_firstname = ""
+                CIN = ""
+                dob = ""
+                gender = ""
+                service_date = ""
+                eligible_code = ""
+                payer_name = ""
+                plan_code = ""
+                address = ""
+                # contact_name = ""
+                contact_tel = ""
+                other_payer_name1 = ""
+                other_payer_address1 = ""
+                other_payer_telephone1 = ""
+                other_payer_group_number1 = ""
+                other_payer_name2 = ""
+                other_payer_address2 = ""
+                other_payer_telephone2 = ""
+                other_payer_group_number2 = ""
+
+                other_payer_name = []
+                other_payer_address = []
+                other_payer_policy_number = ""
+                eligible_result = ""
+                other_payer_telephone = []
+                other_payer_group_number = []
+
+                covered_service_codes = []
+                temp_dict = {}
+
+        result_dict.pop("")
+        result_df = pd.DataFrame(result_dict)
+        result_df = result_df.transpose()
+        result_df = result_df[
+            ['Invoice number', 'Eligibility Result', 'Service date', 'Patient firstname', 'Patient lastname',
+             'Plan code', 'Eligible', 'CIN', 'Covered Codes', 'Patient DOB', 'Patient gender',
+             'Payer name', 'Payer address', 'Contact Tel.', 'Other Payer1 name', 'Other Payer1 address',
+             'Other Payer1 tel.', 'Other Payer1 group number',
+             'Other Payer2 name', 'Other Payer2 address', 'Other Payer2 tel.', 'Other Payer2 group number',
+             'Other Payer policy number']]
+
+        file_name_271 = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
+        result_df.to_excel('271-' + file_name_271 + '.xlsx', index=False)
+
+        SQ.upsert271(table='Eligibility271', data=result_df)   # Store all 271 eligibility result in Sqlite3
+        PendingFromdf = result_df.loc[result_df['Eligibility Result'] == 'PENDING']
+        PendingFromdf_cinList = PendingFromdf['CIN'].tolist()
+        manual_df = SQ.generate_excel_from_manually271Lib(table='ManuallyCheck271', tofile=False)
+        if manual_df.__len__() == 0:
+            print('Database ManuallyCheck271 is empty!')
+        else:
+            eligibleFrom_manual_df_cinList = manual_df.loc[manual_df['Eligible'] == 'Eligible', 'CIN'].tolist()
+            if eligibleFrom_manual_df_cinList.__len__() != 0:
+                for pendingCIN in PendingFromdf_cinList:
+                    if pendingCIN in eligibleFrom_manual_df_cinList:
+                        pendingCIN_idx = PendingFromdf.loc[PendingFromdf['CIN'] == pendingCIN].index.tolist()
+                        PendingFromdf = PendingFromdf.drop(index=pendingCIN_idx)
+
+            PendingFromdf.to_excel('271Not eligible Trips.xlsx', index=False)
+
+    @staticmethod
+    def generate_276(receipt837_file, edi837_data, lined_file=False):
+        df_837 = pd.read_csv(edi837_data) if edi837_data[-1] == 'v' else pd.read_excel(edi837_data)
+
+        if lined_file == False:  # for raw receipt data
+            receipt_df = pd.read_csv(receipt837_file, delimiter="~", header=None, )
+            receipt_df = receipt_df.transpose()
+            receipt_df.columns = ['line']
+            receipt_df['line'] = receipt_df['line'].dropna()
+        else:  # already split into lines
+            receipt_df = pd.read_csv(receipt837_file)
+            receipt_df.columns = ['line']
+
+        receipt_df = receipt_df.dropna()
+        receipt_df['line_sep'] = receipt_df['line'].apply(lambda x: x.split("*"))
+
+        result_dict = {}
+        temp_dict = {}
+
+        invoice_num = ""
+        patient_lastname = ""
+        patient_firstname = ""
+        CIN = ""
+        claim_number = ""
+        service_date = ""
+
+        for l in range(receipt_df.__len__()):
+            row = receipt_df.ix[l, 1]
+
+            if row[0] == 'BHT':
+                invoice_num = row[3]
+
+            elif row[0] == 'NM1' and row[1] == 'QC' and row[2] == '1':
+                patient_lastname = row[3]
+                patient_firstname = row[4]
+                CIN = row[9]
+
+            elif row[0] == 'REF' and row[1] == '1K':
+                claim_number = row[2]
+
+            elif row[0] == 'DTP' and row[1] == '472':
+                service_date = row[3]
+
+            temp_dict[str(invoice_num)] = {
+                'INVOICE NUMBER': invoice_num,
+                'CLIENT LAST NAME': patient_lastname,
+                'CLIENT FIRST NAME': patient_firstname,
+                'MEDICAID ID NUMBER': CIN,
+                'CLAIM CONTROL NUMBER': claim_number,
+                'SVC DATE': service_date,
+            }
+
+            if row[0] == 'SE':  # section ends
+                idx_837 = df_837.loc[df_837['invoice number'] == int(invoice_num)].index.tolist()
+
+                if idx_837.__len__() == 0:
+                    patient_dob = "00001225"
+                    patient_gender = "M"
+                else:
+                    patient_dob = df_837.ix[idx_837[0], 'patient dob']
+                    patient_dob = datetime.strptime(str(patient_dob), '%m/%d/%Y').strftime('%Y%m%d')
+                    patient_gender = df_837.ix[idx_837[0], 'patient gender']
+
+                temp_dict[str(invoice_num)] = {
+                    'INVOICE NUMBER': invoice_num,
+                    'CLIENT LAST NAME': patient_lastname,
+                    'CLIENT FIRST NAME': patient_firstname,
+                    'MEDICAID ID NUMBER': CIN,
+                    'CLAIM CONTROL NUMBER': claim_number,
+                    'SVC DATE': service_date,
+                    'GENDER': patient_gender,
+                    'DOB': patient_dob
+                }
+
+                result_dict.update(temp_dict)
+                invoice_num = ""
+                patient_lastname = ""
+                patient_firstname = ""
+                CIN = ""
+                claim_number = ""
+                service_date = ""
+
+        result_dict.pop("")
+        result_df = pd.DataFrame(result_dict)
+        result_df = result_df.transpose()
+        result_df = result_df[['INVOICE NUMBER', 'DOB', 'GENDER', 'CLIENT LAST NAME',
+                               'CLIENT FIRST NAME', 'MEDICAID ID NUMBER', 'CLAIM CONTROL NUMBER', 'SVC DATE']]
+
+        result_df.to_excel('276-data.xlsx', index=False)
+
+        edi = EDI276(result_df)
+        stream_276_data = edi.ISA_IEA()
+        filename = edi.file_name
+        Process_Methods.write_to_txt(stream_276_data, filename)
+
+    @staticmethod
+    def process_276_receipt(receipt_file, edi837=None, lined_file=False):
+        if lined_file==False:    # for raw receipt data
+            receipt_df = pd.read_csv(receipt_file, delimiter="~", header=None,)
+            receipt_df = receipt_df.transpose()
+            receipt_df.columns = ['line']
+            receipt_df['line'] = receipt_df['line'].dropna().apply(lambda x: x)
+        else:          # already split into lines
+            receipt_df = pd.read_csv(receipt_file)
+            receipt_df.columns = ['line']
+
+        receipt_df = receipt_df.dropna()
+        receipt_df['line_sep'] = receipt_df['line'].apply(lambda x: x.split("*"))
+
+        if edi837:
+            edi837_df = pd.read_excel(edi837)
+            edi837_df['invoice number'] = edi837_df['invoice number'].astype(str)
+
+        SQ = Sqlite_Methods('ProcedureCodes.db')
+
+        result_dict = {}
+        temp_dict = {}
+
+        invoice_num = ""
+        patient_lastname = ""
+        patient_firstname = ""
+        CIN = ""
+        total_expected_amt = ""
+        total_paid_amt = ""
+        claim_ctrl_num = ""
+        service_date = ""
+        embedded_code_dict = {}
+        description = []
+        error_codes = []
+        result = ''
+        status_code = ""
+        status_code2 = ""
+
+        for l in range(receipt_df.__len__()):
+            row = receipt_df.ix[l, 1]
+
+            if row[0] == 'BHT':
+                invoice_num = row[3]
+
+            elif row[0] == 'NM1' and row[1] == 'IL' and row[2] == '1':
+                patient_lastname = row[3]
+                patient_firstname = row[4]
+                CIN = row[9]
+
+            elif row[0] == 'TRN' and row[1] == '2':
+                next_row = receipt_df.ix[l + 1, 1]
+                total_expected_amt = float(next_row[4])
+                total_paid_amt = float(next_row[5])
+                status_code = next_row[1]
+
+                for code in status_code.split(":"):
+                    SQ.cursor.execute(f'SELECT description FROM X12_external_code WHERE Code="{code}"')
+                    resp = SQ.cursor.fetchone()
+                    if resp != None:
+                        description_status_code = f' -{resp[0]}; '
+                    else:
+                        description_status_code = ""
+
+
+                if (abs(total_expected_amt - total_paid_amt) <= 0.02) and (total_expected_amt != 0):
+                    result = 'Paid'
+                elif total_paid_amt == 0:
+                    if total_expected_amt == 0:
+                        result = 'Error' + description_status_code
+                    else:
+                        result = 'Denied' + description_status_code
+                else:
+                    result = 'Partial Paid ' + description_status_code
+
+            elif row[0] == 'REF' and row[1] == '1K':
+                claim_ctrl_num = row[2]
+
+            elif row[0] == 'DTP' and row[1] == '472' and row[2] == 'RD8':
+                service_date = row[3]
+
+            elif row[0] == 'SVC':
+                service_code = row[1]
+                expected_amount = float(row[2])
+                paid_amount = float(row[3])
+                service_code = "".join(service_code.split(":")[1:])
+                embedded_code_dict[service_code] = {'Expected': expected_amount,
+                                                    'Paid': paid_amount}
+                if expected_amount != paid_amount:
+                    error_codes.append(service_code)
+
+                next_row = receipt_df.ix[l+1, 1]
+                status_code2 = next_row[1]
+
+                temp_description = []
+                for code in status_code2.split(":"):
+                    SQ.cursor.execute(f'SELECT description FROM X12_external_code WHERE Code="{code}"')
+                    resp = SQ.cursor.fetchone()
+                    if resp != None:
+                        temp_description.append(resp[0])
+                description += temp_description
+
+            if row[0] == 'SE':
+
+                description = list(set(description))
+                if description.__len__() != 0:
+                    result = result + '-' + '; '.join(description)
+
+                if error_codes.__len__() != 0:
+                    result += " (Wrong Codes: {0})".format(",".join(error_codes))
+
+                if edi837:
+                    npi_temp = edi837_df.loc[edi837_df['invoice number'] == invoice_num, 'service npi'].tolist()
+                    NPI = int(npi_temp[0]) if len(npi_temp) != 0 else 0
+
+                    driver_temp = edi837_df.loc[edi837_df['invoice number'] == invoice_num, 'driver license number'].tolist()
+                    Driver_id = int(driver_temp[0]) if len(driver_temp) != 0 else 0
+
+                    vehicle_temp = edi837_df.loc[edi837_df['invoice number'] == invoice_num, 'driver plate number'].tolist()
+                    Vehicle_id = vehicle_temp[0] if len(vehicle_temp) != 0 else ""
+
+                    claim_amount_temp = edi837_df.loc[
+                        edi837_df['invoice number'] == invoice_num, 'claim_amount'].tolist()
+                    claim_amount = float(claim_amount_temp[0]) if len(claim_amount_temp) != 0 else 0
+
+                    if total_paid_amt >= claim_amount:
+                        result = 'Paid'
+
+                    temp_dict[str(invoice_num)] = {
+                        'Invoice Number': invoice_num,
+                        'Patient Lastname': patient_lastname,
+                        'Patient Firstname': patient_firstname,
+                        'CIN': CIN,
+                        'Claim Ctrl Number': claim_ctrl_num,
+                        'P1 Total Expected Amt': claim_amount,
+                        'P2 Total Expected Amt': total_expected_amt,
+                        'Total Paid Amt': total_paid_amt,
+                        'Service Date': service_date,
+                        'Comparison Codes': str(embedded_code_dict),
+                        'Result': result,
+                        'NPI': NPI,
+                        'DRIVER ID': Driver_id,
+                        'VEHICLE ID': Vehicle_id
+                    }
+
+                else:
+                    temp_dict[str(invoice_num)] = {
+                        'Invoice Number': invoice_num,
+                        'Patient Lastname': patient_lastname,
+                        'Patient Firstname': patient_firstname,
+                        'CIN': CIN,
+                        'Claim Ctrl Number': claim_ctrl_num,
+                        'P2 Total Expected Amt': total_expected_amt,
+                        'Total Paid Amt': total_paid_amt,
+                        'Service Date': service_date,
+                        'Comparison Codes': str(embedded_code_dict),
+                        'Result': result,
+                    }
+
+                result_dict.update(temp_dict)
+
+                invoice_num = ""
+                patient_lastname = ""
+                patient_firstname = ""
+                CIN = ""
+                total_expected_amt = ""
+                total_paid_amt = ""
+                claim_ctrl_num = ""
+                service_date = ""
+                embedded_code_dict = {}
+                description = []
+                error_codes = []
+                result = ''
+                status_code = ""
+                status_code2 = ""
+
+        result_df = pd.DataFrame(result_dict)
+        result_df = result_df.transpose()
+        if edi837:
+            result_df = result_df[['Invoice Number', 'Result', 'P1 Total Expected Amt', 'P2 Total Expected Amt', 'Total Paid Amt', 'Comparison Codes',
+                               'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date', 'NPI', 'DRIVER ID', 'VEHICLE ID']]
+
+        else:
+            result_df = result_df[
+                ['Invoice Number', 'Result', 'P2 Total Expected Amt', 'Total Paid Amt',
+                 'Comparison Codes',
+                 'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date']]
+
+        file_name_276277 = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
+
+        result_df.to_excel('test276277.xlsx',index=False)
+
 
 class MongoDB_Methods():
     '''
     Methods with MongoDB
     '''
     def __init__(self, localhost=False):
-        mongo_uri = "mongodb://root:" + urllib.parse.quote('0p8rr@Fruit') + '@192.168.130.62:27017/operr_v3_dev'
-        self.conn = MongoClient(mongo_uri)
-        self.db = self.conn.operr_v3_dev
-        self.mycollection = self.db.polygon_boundary_keyuan_copy
 
         if localhost == True:
             local_uri = "mongodb://127.0.0.1:27017"
             self.conn = MongoClient(local_uri)
             self.db = self.conn.polygon
-            self.mycollection = self.db.polygon_local
+            self.mycollection = self.db.ali_polygon
+
+        else:
+            mongo_uri = "mongodb://root:" + urllib.parse.quote('0p8rr@Fruit') + '@192.168.130.62:27017/operr_v3_dev'
+            self.conn = MongoClient(mongo_uri)
+            self.db = self.conn.operr_v3_dev
+            self.mycollection = self.db.polygon_boundary_keyuan_copy
 
     def getPolygonID(self, lng, lat):
         '''
@@ -282,6 +977,7 @@ class MongoDB_Methods():
         :param lat:
         :return: Return all polygonIDs containing this geo point, list type
         '''
+        # t1 = time.time()
         response = self.mycollection.find(
             {
                 'boundary': {
@@ -296,7 +992,8 @@ class MongoDB_Methods():
         )
 
         result = [i['polygonId'] for i in response]
-        self.conn.close()
+        # self.conn.close()
+        # print(time.time() - t1)
         return result
 
 
@@ -351,7 +1048,7 @@ class Sqlite_Methods():
         self.create_table_cache_address(table)
         self.cursor.execute(f'INSERT OR REPLACE INTO {table} (Address, Longitude, Latitude, PolygonIDs) VALUES ("{address}", "{lng}", "{lat}", "{poly_id}")')
         self.conn.commit()
-        self.cursor.close()
+        # self.cursor.close()
 
     def check_address_in_cache(self, table, address):
         '''
@@ -363,8 +1060,125 @@ class Sqlite_Methods():
         self.create_table_cache_address(table)
         self.cursor.execute(f'SELECT Longitude, Latitude, PolygonIDs FROM {table} WHERE Address="{address}"')
         resp = self.cursor.fetchone()
-        self.cursor.close()
+        # self.cursor.close()
         return resp
+
+    def IfplancodeInDB(self, table, plancode):
+        self.cursor.execute('SELECT PlanCode FROM {0} WHERE PlanCode="{1}"'.format(table, plancode))
+        res = self.cursor.fetchone()
+        if not res:
+            return False
+        else:
+            return True
+
+    def create_table_271(self, table):
+        self.cursor.execute('CREATE TABLE IF NOT EXISTS {0}(InvoiceNumber TEXT, EligibilityResult TEXT, ServiceDate DATE, PatientLN TEXT, PatientFN TEXT, PlanCode TEXT,\
+                              Eligible TEXT, CIN TEXT, CoveredCodes TEXT,  DOB DATE, Gender TEXT, \
+                               PayerName TEXT, PayerAddress TEXT, PayerTel TEXT, OtherPayer1Name TEXT, OtherPayer1Address TEXT, \
+                               OtherPayer1Tel TEXT, OtherPayer1GroupNum TEXT, OtherPayer2Name TEXT, OtherPayer2Address TEXT, \
+                               OtherPayer2Tel TEXT, OtherPayer2GroupNum TEXT, OtherPayerPolicyNum TEXT, UpdateDate DATE, PRIMARY KEY(InvoiceNumber))'.format(table))
+
+    def upsert271(self, table, data):
+        '''
+        :param table: sql table name
+        :param data: dataframe like
+        :return: None
+        '''
+        self.create_table_271(table)
+        data_len = data.__len__()
+
+        for l in range(data_len):
+            row_data = data.ix[l, :]
+
+            invoice_num = row_data['Invoice number']
+            eligibility_result = row_data['Eligibility Result']
+            CIN = row_data['CIN']
+            service_date = row_data['Service date']
+            plan_code = row_data['Plan code']
+            eligible = row_data['Eligible']
+            covered_codes = row_data['Covered Codes']
+            patient_ln = row_data['Patient firstname']
+            patient_fn = row_data['Patient lastname']
+            dob = row_data['Patient DOB']
+            gender = row_data['Patient gender']
+            payer_name = row_data['Payer name']
+            payer_address = row_data['Payer address']
+            payer_tel = row_data['Contact Tel.']
+            otherpayer1name = row_data['Other Payer1 name']
+            otherpayer1address = row_data['Other Payer1 address']
+            otherpayer1tel = row_data['Other Payer1 tel.']
+            otherpayer1groupnum = row_data['Other Payer1 group number']
+            otherpayer2name = row_data['Other Payer2 name']
+            otherpayer2address = row_data['Other Payer2 address']
+            otherpayer2tel = row_data['Other Payer2 tel.']
+            otherpayer2groupnum = row_data['Other Payer2 group number']
+            otherpayerpolicynum = row_data['Other Payer policy number']
+            update_date = datetime.today().date()
+
+
+            self.cursor.execute('INSERT OR REPLACE INTO {0} (InvoiceNumber, EligibilityResult, ServiceDate, PatientLN, PatientFN, PlanCode, Eligible, CIN, CoveredCodes, DOB, \
+                                    Gender, PayerName, PayerAddress, PayerTel, OtherPayer1Name, OtherPayer1Address, OtherPayer1Tel, OtherPayer1GroupNum, \
+                                    OtherPayer2Name, OtherPayer2Address, OtherPayer2Tel, OtherPayer2GroupNum, OtherPayerPolicyNum, UpdateDate) \
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'.format(table),
+                (invoice_num, eligibility_result, service_date, patient_ln, patient_fn, plan_code, eligible, CIN, covered_codes, dob, gender, payer_name, payer_address, payer_tel,
+                 otherpayer1name, otherpayer1address, otherpayer1tel, otherpayer1groupnum, otherpayer2name, otherpayer2address, otherpayer2tel, otherpayer2groupnum, otherpayerpolicynum, update_date))
+
+        self.conn.commit()
+
+    def create_table_manuallyCheck_lib(self, table):
+        self.cursor.execute(
+            'CREATE TABLE IF NOT EXISTS {0}(Eligible TEXT, PatientLN TEXT, PatientFN TEXT, CIN TEXT, Description TEXT, UpdateDate DATE, PRIMARY KEY(CIN))'.format(
+                table))
+
+    def manuallyUpsert271Lib(self, table, eligible, patient_ln, patient_fn, cin, description):
+        self.create_table_manuallyCheck_lib(table)
+        update_date = datetime.today().date()
+        self.cursor.execute(
+            'INSERT OR REPLACE INTO {0} (Eligible, PatientLN, PatientFN, CIN, Description, UpdateDate) VALUES (?,?,?,?,?,?)'.format(
+                table),
+            (eligible, patient_ln, patient_fn, cin, description, update_date))
+        self.conn.commit()
+
+    def delete_manually271Lib(self, table, cin):
+        self.cursor.execute('DELETE FROM {0} WHERE cin="{1}"'.format(table, cin))
+        self.conn.commit()
+
+    def delete_lastmonth_manually271Lib(self, table):
+        self.cursor.execute(f'SELECT UpdateDate, CIN FROM {table}')
+        response = self.cursor.fetchall()
+        current_month = arrow.now().date().month
+
+        for res in response:
+            date, cin = res
+            month_of_date = arrow.get(date).date().month
+            if month_of_date != current_month:
+                self.delete_manually271Lib(table, cin)
+                print(f'CIN: {cin} is expired!')
+            else:
+                pass
+
+    def generate_excel_from_manually271Lib(self, table, tofile=True):
+        date = datetime.today().date()
+        df = pd.read_sql('SELECT * FROM {0}'.format(table), con=self.conn)
+        if tofile==True:
+
+            current_path = os.getcwd()
+            daily_folder = str(datetime.today().date())
+            basename = info_locker.base_info['BaseName']
+            file_saving_path = os.path.join(current_path, basename, daily_folder)
+            if not os.path.exists(file_saving_path):
+                os.makedirs(file_saving_path)
+                print('Save files to {0}'.format(file_saving_path))
+            df.to_excel('Manually Checking Lib-' + str(date) + '.xlsx', index=False)
+        return df
+
+    def create_table_x12_external_code(self, table):
+        self.cursor.execute(f'CREATE TABLE IF NOT EXISTS {table}(Code TEXT, Description TEXT, PRIMARY KEY(Code))')
+
+    def upsert_x12_external_code(self, table, code, description):
+        self.create_table_x12_external_code(table)
+        self.cursor.execute(f'INSERT OR REPLACE INTO {table} (Code, Description) VALUES ("{code}", "{description}")')
+        self.conn.commit()
 
 
 class Process_MAS():
@@ -1049,37 +1863,726 @@ class Compare_Signoff_PA():
         edi_837_df.to_excel('837 test.xlsx', index=False)
 
 
+class EDI837P():
+
+    def __init__(self, file, delayed_claim=False):
+        self.delayed_claim = delayed_claim
+        self.df = pd.read_csv(file, dtype=object) if file[-1] == 'v' else pd.read_excel(file, dtype=object)
+        # self.df = self.df.fillna("")
+
+        self.df['service date'] = self.df['service date'].apply(lambda x: arrow.get(str(x), ['MM/DD/YYYY', 'YYYY-MM-DD HH:mm:ss']).format('YYYYMMDD'))
+        self.df['patient dob'] = self.df['patient dob'].apply(lambda x: arrow.get(str(x), ['MM/DD/YYYY', 'YYYY-MM-DD HH:mm:ss']).format('YYYYMMDD'))
+        self.df['patient pregnant'] = self.df['patient pregnant'].apply(lambda x: x == "Y")
+
+        self.transaction_num = self.df.__len__()
+        self.basic_line = 33
+        self.lx_lines = 0
+
+        self.submitter_info = info_locker.base_info
+        self.bill_provider = info_locker.base_info
+        self.driver_info = info_locker.driver_information
+        self.receiver_info = info_locker.NYSDOH
+        self.version_code = info_locker.version_code['837']
+
+        self.date_format1 = datetime.today().date().strftime("%y%m%d")  #used in ISA
+        self.date_format2 = datetime.today().date().strftime("%Y%m%d")
+        self.time_format = datetime.now().time().strftime("%H%M")
+        self.interchange_ctrl_number = "0" + str(self.date_format1) + str(self.time_format[2:])
+        # self.file_name = self.interchange_ctrl_number + '.txt'
+        self.all_invoice_number = []
+        self.invoice_ST_SE_dict = {}
+        self.file_name = '837-' + re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file)[0]  if re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file).__len__() != 0 else '837-' + str(datetime.today().date())
+
+    def ISA(self, prod=True):
+        if prod==False:
+
+            ISA = ["ISA", "00", " "*10, "00", " "*10, "ZZ", '{:<15s}'.format(self.submitter_info['ETIN']),
+                    "ZZ", '{:<15s}'.format(self.receiver_info['ETIN']), str(self.date_format1),
+                    str(self.time_format), '^', '00501', self.interchange_ctrl_number, '0', 'T', ':~']
+
+        else:
+
+            ISA = ["ISA", "00", " "*10, "00", " "*10, "ZZ", '{:<15s}'.format(self.submitter_info['ETIN']),
+                    "ZZ", '{:<15s}'.format(self.receiver_info['ETIN']), str(self.date_format1),
+                    str(self.time_format), '^', '00501', self.interchange_ctrl_number, '1', 'P', ':~']
+
+        return '*'.join(ISA)
+
+    def GS(self):
+        GS = ["GS", "HC", self.submitter_info['ETIN'], self.receiver_info['ETIN'], self.date_format2,
+              self.time_format, "1", "X", self.version_code]
+
+        return '*'.join(GS) + "~"
+
+    def transaction_header(self, iterations, invoice_number):
+        ST = ["ST", "837", str('{:>04d}'.format(iterations)), self.version_code]
+        BHT = ["BHT", "0019", "00", str(invoice_number), self.date_format2, self.time_format, "CH"]
+        self.all_invoice_number.append(invoice_number)
+
+        return '*'.join(ST) + "~" + '*'.join(BHT) + "~"
+
+    def loop1000a(self):
+        NM1 = ["NM1", "41", "2", self.submitter_info['BaseName'], "", "", "", "", "46", self.submitter_info['ETIN']]
+        PER = ["PER", "IC", self.submitter_info['ContactName'], "TE", self.submitter_info['ContactTel'] ]
+
+        return '*'.join(NM1) + "~" + '*'.join(PER) + "~"
+
+    def loop1000b(self):
+        NM1 = ["NM1", "40", "2", self.receiver_info['name'], "", "", "", "", "46", self.receiver_info['id']]
+
+        return '*'.join(NM1) + "~"
+
+    def loop2000a(self):   # billing provider HL
+        HL = ["HL", "1", "", "20", "1"]
+
+        return '*'.join(HL) + "~"
+
+    def loop2010aa(self): #Billing provider info
+        NM1 = ["NM1", "85", "2", self.bill_provider['BaseName']]
+        N3 = ["N3", self.bill_provider['BaseAddress']]
+        N4 = ["N4", self.bill_provider['City'], self.bill_provider['State'], self.bill_provider['zipcode']]
+        REF = ["REF", "EI", self.bill_provider['TaxID']]
+
+        return '*'.join(NM1) + "~" + '*'.join(N3) + "~" + '*'.join(N4) + "~" + '*'.join(REF) + "~"
+
+    def loop2000b(self):  # subscriber HL
+        HL = ["HL", "2", "1", "22", "0"]
+        SBR = ["SBR", "P", "18", "", "", "", "", "", "", "MC"]
+
+        return '*'.join(HL) + "~" + '*'.join(SBR) + "~"
+
+    def loop2010ba(self, first, last, medi_num, address, city, state, zipcode, dob, gender):
+        if first == "":
+            first = "NoRecord"
+        if last == "":
+            last = "NoRecord"
+        if medi_num == "":
+            medi_num = "NoRecord"
+        if address == "":
+            address = 'NoRecord'
+        if city == "":
+            city = "NoRecord"
+        if state == "":
+            state = "NoRecord"
+        if zipcode == "":
+            zipcode = "00000"
+        if dob == "":
+            dob = "19000101"
+        if gender == "":
+            gender = "M"
+
+        NM1 = ["NM1", "IL", "1", last.upper(), first.upper(), "", "", "", "MI", medi_num]
+        N3 = ["N3", address.upper()]
+        N4 = ["N4", city.upper(), state.upper(), str(zipcode)]
+        DMG = ["DMG", "D8", str(dob), gender]
+
+        return '*'.join(NM1) + "~" + '*'.join(N3) + "~" + '*'.join(N4) + "~" + '*'.join(DMG) + "~" # subscriber name
+
+    def loop2010bb(self): # payer info
+        NM1 = ["NM1", "PR", "2", self.receiver_info['name'], "", "", "", "", "PI", self.receiver_info['id']]
+        N3 = ["N3", self.receiver_info['address']]
+        N4 = ["N4", self.receiver_info['city'], self.receiver_info['state'], self.receiver_info['zipcode']]
+        REF1 = ["REF", "G2", self.submitter_info['MedicaidProviderNum']]
+        REF2 = ["REF", "LU", "003"]
+
+        return '*'.join(NM1) + "~" + '*'.join(N3) + "~" + '*'.join(N4) + "~" + '*'.join(REF1) + "~" + '*'.join(REF2) + "~"
+
+    def loop2300(self, invoice_number, amount, pa_num): #claim info
+        if amount == "":
+            amount = "0"
+        if pa_num == "":
+            pa_num = 0
+
+        if self.delayed_claim == True:
+            CLM = ["CLM", str(invoice_number), str(amount), "", "", "99:B:1", "Y", "A", "Y", "Y", "P", "","","","","","","","","","11"]
+        else:
+            CLM = ["CLM", str(invoice_number), str(amount), "", "", "99:B:1", "Y", "A", "Y", "Y", "P"]
+        REF = ['REF', "G1", str('{:>011d}'.format(int(pa_num)))]
+        HI = ["HI", "ABK:R69"]
+
+        return '*'.join(CLM) + "~" + '*'.join(REF) + "~" + '*'.join(HI) + "~"
+
+    def loop2310a(self, driver_first, driver_last, driver_lic, service_name, service_NPI): #referring provider
+        if driver_first == "":
+            driver_first = "NoRecord"
+        if driver_last == "":
+            driver_last = "NoRecord"
+        if driver_lic == "":
+            driver_lic = 000000000
+        if service_name == "":
+            service_name = "NoRecord"
+        if service_NPI == "":
+            service_NPI = 000000000
+        NM1 = ["NM1", "DN", "1", service_name.upper(), "", "", "", "", "XX", str(service_NPI)]
+        NM1_1 = ["NM1", "P3", "1", driver_last.upper(), driver_first.upper()]
+        REF = ["REF", "0B", str(driver_lic)]
+
+        return '*'.join(NM1) + "~" + '*'.join(NM1_1) + "~" + '*'.join(REF) + "~"
+
+    def loop2310b(self, driver_plate): #rendering provider name
+        if driver_plate == "":
+            driver_plate = 'A000000A'
+        NM1 = ["NM1", "82", "2", self.submitter_info['BaseName']]
+        REF = ["REF", "G2", driver_plate.upper()]
+
+        return '*'.join(NM1) + "~" + "*".join(REF) + "~"
+
+    def loop2310c(self, service_name, service_NPI, service_address, service_city, service_state, service_zip):
+        NM1 = ["NM1", "77", "2", service_name.upper().replace(",", ""), "", "", "", "", "XX", str(service_NPI)]
+        N3 = ["N3", service_address.upper()]
+        N4 = ["N4", service_city.upper(), service_state.upper(), str(service_zip)]
+
+        return '*'.join(NM1) + "~" + '*'.join(N3) + "~" + '*'.join(N4) + "~"
+
+    def lx1(self, code, modifier, amount, unit, service_date):
+        if str(modifier) == 'nan':
+            SV1_01 = "HC:{0}".format(code)
+
+        else:
+            SV1_01 = "HC:{0}:{1}".format(code, modifier)
+
+        if isinstance(unit, np.int64) == True:
+            SV1_04 = str(int(unit))
+        else:
+            SV1_04 = str(unit)
+
+        LX1 = ["LX", "1"]
+        SV1 = ["SV1", SV1_01, str(amount), "UN", SV1_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        DTP = ["DTP", "472", "D8", service_date]
+
+        return '*'.join(LX1) + "~" + '*'.join(SV1) + "~" + '*'.join(DTP) + "~"
+
+    def lx2(self, code, modifier, amount, unit, service_date):
+        if str(modifier) == 'nan':
+            SV2_01 = "HC:{0}".format(code)
+
+        else:
+            SV2_01 = "HC:{0}:{1}".format(code, modifier)
+
+        if isinstance(unit, np.int64) == True:
+            SV2_04 = str(int(unit))
+        else:
+            SV2_04 = str(unit)
+
+        LX2 = ["LX", "2"]
+        SV2 = ["SV1", SV2_01, str(amount), "UN", SV2_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        DTP = ["DTP", "472", "D8", service_date]
+
+        return '*'.join(LX2) + "~" + '*'.join(SV2) + "~" + '*'.join(DTP) + "~"
+
+    def lx3(self, code, modifier, amount, unit, service_date):
+        if str(modifier) == 'nan':
+            SV3_01 = "HC:{0}".format(code)
+
+        else:
+            SV3_01 = "HC:{0}:{1}".format(code, modifier)
+
+
+        if isinstance(unit, np.int64) == True:
+            SV3_04 = str(int(unit))
+        else:
+            SV3_04 = str(unit)
+
+        LX3 = ["LX", "3"]
+        SV3 = ["SV1", SV3_01, str(amount), "UN", SV3_04 , "", "", "1", "", "", "", "", "", "", "", "0"]
+        DTP = ["DTP", "472", "D8", service_date]
+
+        return '*'.join(LX3) + "~" + '*'.join(SV3) + "~" + '*'.join(DTP) + "~"
+
+    def lx4(self, code, modifier, amount, unit, service_date):
+        if str(modifier) == 'nan':
+            SV4_01 = "HC:{0}".format(code)
+
+        else:
+            SV4_01 = "HC:{0}:{1}".format(code, modifier)
+
+        if isinstance(unit, np.int64) == True:
+            SV4_04 = str(int(unit))
+        else:
+            SV4_04 = str(unit)
+
+        LX4 = ["LX", "4"]
+        SV4 = ["SV1", SV4_01, str(amount), "UN", SV4_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        DTP = ["DTP", "472", "D8", service_date]
+
+        return '*'.join(LX4) + "~" + '*'.join(SV4) + "~" + '*'.join(DTP) + "~"
+
+    def lx5(self, code, modifier, amount, unit, service_date):
+        if str(modifier) == 'nan':
+            SV5_01 = "HC:{0}".format(code)
+
+        else:
+            SV5_01 = "HC:{0}:{1}".format(code, modifier)
+
+        if isinstance(unit, np.int64) == True:
+            SV5_04 = str(int(unit))
+        else:
+            SV5_04 = str(unit)
+
+        LX5 = ["LX", "5"]
+        SV5 = ["SV1", SV5_01, str(amount), "UN", SV5_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        DTP = ["DTP", "472", "D8", service_date]
+
+        return '*'.join(LX5) + "~" + '*'.join(SV5) + "~" + '*'.join(DTP) + "~"
+
+    def lx6(self, code, modifier, amount, unit, service_date):
+        if str(modifier) == 'nan':
+            SV6_01 = "HC:{0}".format(code)
+
+        else:
+            SV6_01 = "HC:{0}:{1}".format(code, modifier)
+
+        if isinstance(unit, np.int64) == True:
+            SV6_04 = str(int(unit))
+        else:
+            SV6_04 = str(unit)
+
+        LX6 = ["LX", "6"]
+        SV6 = ["SV1", SV6_01, str(amount), "UN", SV6_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        DTP = ["DTP", "472", "D8", service_date]
+
+        return '*'.join(LX6) + "~" + '*'.join(SV6) + "~" + '*'.join(DTP) + "~"
+
+    def loop2400(self, row_data):
+
+        lx1 = self.lx1(code=row_data['service code 1'].values[0], amount=row_data['amount 1'].values[0], unit=row_data['unit 1'].values[0],
+                       service_date=row_data['service date'].values[0], modifier=row_data['modifier code 1'].values[0])
+
+        if row_data['service code 2'].isnull().values[0] == True:
+            lx2 = lx3 = lx4 = lx5 = lx6 = ""
+        else:
+            lx2 = self.lx2(code=row_data['service code 2'].values[0], amount=row_data['amount 2'].values[0], unit=row_data['unit 2'].values[0],
+                           service_date=row_data['service date'].values[0], modifier=row_data['modifier code 2'].values[0])
+
+            if row_data['service code 3'].isnull().values[0] == True:
+                lx3 = lx4 = lx5 = lx6 = ""
+
+            else:
+                lx3 = self.lx3(code=row_data['service code 3'].values[0], amount=row_data['amount 3'].values[0], unit=row_data['unit 3'].values[0],
+                               service_date=row_data['service date'].values[0], modifier=row_data['modifier code 3'].values[0])
+
+                if row_data['service code 4'].isnull().values[0] == True:
+                    lx4 = lx5 = lx6 = ""
+
+                else:
+                    lx4 = self.lx4(code=row_data['service code 4'].values[0], amount=row_data['amount 4'].values[0], unit=row_data['unit 4'].values[0],
+                               service_date=row_data['service date'].values[0], modifier=row_data['modifier code 4'].values[0])
+
+                    if row_data['service code 5'].isnull().values[0] == True:
+                        lx5 = lx6 = ""
+
+                    else:
+                        lx5 = self.lx5(code=row_data['service code 5'].values[0], amount=row_data['amount 5'].values[0], unit=row_data['unit 5'].values[0],
+                               service_date=row_data['service date'].values[0], modifier=row_data['modifier code 5'].values[0])
+
+                        if row_data['service code 6'].isnull().values[0] == True:
+                            lx6 = ""
+                        else:
+                            lx6 = self.lx6(code=row_data['service code 6'].values[0], amount=row_data['amount 6'].values[0], unit=row_data['unit 6'].values[0],
+                               service_date=row_data['service date'].values[0], modifier=row_data['modifier code 6'].values[0])
+
+        if len(lx1) > 0:
+            self.lx_lines += 3
+
+        if len(lx2) > 0:
+            self.lx_lines += 3
+
+        if len(lx3) > 0:
+            self.lx_lines += 3
+
+        if len(lx4) > 0:
+            self.lx_lines += 3
+
+        if len(lx5) > 0:
+            self.lx_lines += 3
+
+        if len(lx6) > 0:
+            self.lx_lines += 3
+
+        return lx1+lx2+lx3+lx4+lx5+lx6
+
+    def transaction_trailer(self, count_line, iterations):
+        SE = ["SE", str(count_line), str('{:>04d}'.format(iterations))]
+        return '*'.join(SE) + "~"
+
+    def GE(self, count_ST):
+        GE = ["GE", str(count_ST), "1"]
+
+        return '*'.join(GE) + "~"
+
+    def IEA(self):
+        IEA = ["IEA", "1", self.interchange_ctrl_number]
+
+        return '*'.join(IEA) + "~"
+
+    def ST_SE_loop(self):
+
+        result = []
+        temp_invoice_num = []
+        temp_ST_SE = []
+        temp_patient_fn = []
+        temp_patient_ln = []
+        temp_patient_medicaid_num = []
+        temp_service_date = []
+        temp_837_name = []
+
+        for row in range(self.transaction_num):
+            self.lx_lines = 0
+            df_row = self.df.ix[[row]]   # get row data
+
+            ST = self.transaction_header(iterations=row+1, invoice_number= df_row['invoice number'].values[0])
+            loop1000a = self.loop1000a()
+            loop1000b = self.loop1000b()
+            loop2000a = self.loop2000a()
+            loop2010aa = self.loop2010aa()
+            loop2000b = self.loop2000b()
+            loop2010ba = self.loop2010ba(first=df_row['patient first name'].values[0], last=df_row['patient last name'].values[0], medi_num=df_row['patient medicaid number'].values[0],
+                                         address=df_row['patient address'].values[0], city=df_row['patient city'].values[0], state=df_row['patient state'].values[0],
+                                         zipcode=df_row['patient zip code'].values[0], dob=df_row['patient dob'].values[0], gender=df_row['patient gender'].values[0])
+            loop2010bb = self.loop2010bb()
+            loop2300 = self.loop2300(invoice_number=df_row['invoice number'].values[0], amount=df_row['claim_amount'].values[0], pa_num=df_row['pa number'].values[0])
+            loop2310a = self.loop2310a(driver_first=df_row['driver first name'].values[0], driver_last=df_row['driver last name'].values[0],
+                                       driver_lic=df_row['driver license number'].values[0], service_name=df_row['service facility name'].values[0],
+                                       service_NPI=df_row['service npi'].values[0])
+            loop2310b = self.loop2310b(driver_plate=df_row['driver plate number'].values[0])
+            loop2310c = self.loop2310c(service_name=df_row['service facility name'].values[0], service_NPI=df_row['service npi'].values[0],
+                                       service_address=df_row['service address'].values[0], service_city=df_row['service city'].values[0],
+                                       service_state=df_row['service state'].values[0], service_zip=df_row['service zip code'].values[0])
+            loop2400 = self.loop2400(df_row)
+
+            lines_st_se = self.basic_line + self.lx_lines
+            SE = self.transaction_trailer(count_line=lines_st_se, iterations=row+1)
+
+            merge_loop = ST + loop1000a + loop1000b + loop2000a + loop2010aa + loop2000b + loop2010ba + loop2010bb + loop2300 + loop2310a + loop2310b + loop2310c + loop2400 + SE
+
+            # self.invoice_ST_SE_dict[str(df_row['invoice number'].values[0])] = {'ST_SE loop': merge_loop,
+            #                                                                     'Patient FN': df_row['patient first name'].values[0],
+            #                                                                     'Patient LN': df_row['patient last name'].values[0],
+            #                                                                     'Patient medicaid number': df_row['patient medicaid number'].values[0],
+            #                                                                     'Service date': df_row['service date'].values[0],
+            #                                                                     '837 file name': self.file_name,
+            #                                                                     }
+            temp_837_name.append(self.file_name)
+            temp_invoice_num.append(df_row['invoice number'].values[0])
+            temp_patient_fn.append(df_row['patient first name'].values[0])
+            temp_patient_ln.append(df_row['patient last name'].values[0])
+            temp_patient_medicaid_num.append(df_row['patient medicaid number'].values[0])
+            temp_ST_SE.append(merge_loop)
+            temp_service_date.append(df_row['service date'].values[0])
+
+            result.append(merge_loop)
+
+        self.invoice_ST_SE_dict = {'837 file name': temp_837_name,
+                                   'Invoice number': temp_invoice_num,
+                                   'Patient FN': temp_patient_fn,
+                                   'Patient LN': temp_patient_ln,
+                                   'Patient medicaid number': temp_patient_medicaid_num,
+                                   'Service date': temp_service_date,
+                                   'ST_SE': temp_ST_SE}
+        return "".join(result)
+
+    def ISA_IEA(self):
+        ISA = self.ISA()
+        GS = self.GS()
+        ST_SE = self.ST_SE_loop()
+        GE = self.GE(self.transaction_num)
+        IEA = self.IEA()
+
+        return ISA + GS + ST_SE + GE + IEA
+
+
+class EDI270():
+
+    def __init__(self, file):
+
+        if isinstance(file, pd.DataFrame):     #if input is pandas dataframe type, use it directly or read from csv or excel
+            self.df = file
+        else:
+            self.df = pd.read_csv(file, dtype=object) if file[-1] == 'v' else pd.read_excel(file, dtype=object)
+
+        self.df['SVC DATE'] = self.df['SVC DATE'].apply(lambda x: arrow.get(str(x), ['YYYY-MM-DD HH:mm:ss', 'MM/DD/YYYY']).format('YYYYMMDD'))
+
+        self.df['DOB'] = self.df['DOB'].apply(lambda x: arrow.get(str(x), ['YYYY-MM-DD HH:mm:ss', 'MM/DD/YYYY']).format('YYYYMMDD'))
+
+        self.transaction_num = self.df.__len__()   # the number of trips in data
+        self.st_se_fixed_lines = 13   # fixed number of lines between ST and SE(each section)
+
+        self.date_format1 = datetime.today().date().strftime("%y%m%d")  # used in ISA
+        self.date_format2 = datetime.today().date().strftime("%Y%m%d")
+        self.time_format = datetime.now().time().strftime("%H%M%S")
+        self.interchange_ctrl_number = "0" + str(self.date_format1) + str(self.time_format[2:4])
+
+        self.version_code = info_locker.version_code['270']
+        self.submitter_info = info_locker.base_info
+        self.receiver_info = info_locker.NYSDOH
+
+        self.file_name = '270-' + self.date_format2 + self.time_format + ".txt"
+
+    def ISA(self, prod=True):
+        if prod==False:    # PTE mode
+
+            ISA = ["ISA", "00", " "*10, "00", " "*10, "ZZ", '{:<15s}'.format(self.submitter_info['ETIN']),
+                    "ZZ", '{:<15s}'.format(self.receiver_info['ETIN']), str(self.date_format1),
+                    str(self.time_format[:-2]), '^', '00501', self.interchange_ctrl_number, '0', 'T', ':~']
+
+        else:     # production mode
+
+            ISA = ["ISA", "00", " "*10, "00", " "*10, "ZZ", '{:<15s}'.format(self.submitter_info['ETIN']),
+                    "ZZ", '{:<15s}'.format(self.receiver_info['ETIN']), str(self.date_format1),
+                    str(self.time_format[:-2]), '^', '00501', self.interchange_ctrl_number, '1', 'P', ':~']
+
+        return '*'.join(ISA)
+
+    def GS(self):
+        GS = ["GS", "HS", self.submitter_info['ETIN'], self.receiver_info['ETIN'], self.date_format2,
+              self.time_format[:-2], "1", "X", self.version_code]
+
+        return '*'.join(GS) + "~"
+
+    def transaction_header(self, iterations, invoice_number):
+        ST = ["ST", "270", str('{:>04d}'.format(iterations)), self.version_code]
+        BHT = ["BHT", "0022", "13", str(invoice_number).strip(), self.date_format2, self.time_format[:-2]]
+
+        return '*'.join(ST) + "~" + '*'.join(BHT) + "~"
+
+    def first_HL(self):
+        HL = ["HL", "1", "", "20", "1"]
+        NM1 = ["NM1", "PR", "2", self.receiver_info['name'], "", "", "", "", "FI", self.receiver_info['id']]
+
+        return "*".join(HL) + "~" + "*".join(NM1) + "~"
+
+    def second_HL(self, service_name, service_npi):
+        HL = ["HL", "2", "1", "21", "1"]
+        NM1 = ["NM1", "1P", "2", service_name.strip().replace(",", ""), "", "", "", "", "XX", str(service_npi).strip()]
+        REF = ["REF", "EO", self.submitter_info['MedicaidProviderNum']]
+
+        return "*".join(HL) + "~" + "*".join(NM1) + "~" + "*".join(REF) + "~"
+
+    def third_HL(self, patient_lastname, patient_firstname, medicaid_number, dob, gender, service_date):
+        HL = ["HL", "3", "2", "22", "0"]
+        NM1 = ["NM1", "IL", "1", patient_lastname.strip().upper(), patient_firstname.strip().upper(), "", "", "", "MI", medicaid_number.strip().upper()]
+        DMG = ["DMG", "D8", str(dob), gender.upper()]
+        DTP = ["DTP", "291", "D8", str(service_date)]
+        EQ = ["EQ", "30"]
+
+        return "*".join(HL) + "~" + "*".join(NM1) + "~" + "*".join(DMG) + "~" + "*".join(DTP) + "~" + "*".join(EQ) + "~"
+
+    def transaction_trailer(self, iterations):
+        SE = ["SE", "13", str('{:>04d}'.format(iterations))]
+        return '*'.join(SE) + "~"
+
+    def GE(self, count_ST):
+        GE = ["GE", str(count_ST), "1"]
+
+        return '*'.join(GE) + "~"
+
+    def IEA(self):
+        IEA = ["IEA", "1", self.interchange_ctrl_number]
+
+        return "*".join(IEA) + "~"
+
+    def ST_SE_loop(self):
+
+        result = []
+        for row in range(self.transaction_num):
+            df_row = self.df.ix[[row]]
+            ST = self.transaction_header(iterations=row+1, invoice_number=df_row['INVOICE NUMBER'].values[0])
+            first_HL = self.first_HL()
+            second_HL = self.second_HL(service_name=df_row['SVC NAME'].values[0], service_npi=df_row['SVC NPI'].values[0])
+            third_HL = self.third_HL(patient_lastname=df_row['CLIENT LAST NAME'].values[0], patient_firstname=df_row['CLIENT FIRST NAME'].values[0],
+                                     medicaid_number=df_row['MEDICAID ID NUMBER'].values[0], dob=df_row['DOB'].values[0],
+                                     gender=df_row['GENDER'].values[0], service_date=df_row['SVC DATE'].values[0])
+            SE = self.transaction_trailer(iterations=row+1)
+
+            merged_loop = ST + first_HL + second_HL + third_HL + SE
+            result.append(merged_loop)
+
+        return "".join(result)
+
+    def ISA_IEA(self):
+        ISA = self.ISA()
+        GS = self.GS()
+        ST_SE = self.ST_SE_loop()
+        GE = self.GE(self.transaction_num)
+        IEA = self.IEA()
+
+        return ISA + GS + ST_SE + GE + IEA
+
+
+class EDI276():
+
+    def __init__(self, file):
+        if isinstance(file, pd.DataFrame):
+            self.df = file
+        else:
+            self.df = pd.read_csv(file) if file[-1] == 'v' else pd.read_excel(file)
+
+        # print(self.df)
+        # try:
+        #     self.df['SVC DATE'] = self.df['SVC DATE'].apply(lambda x: datetime.strptime(str(x), "%Y%m%d").strftime("%Y%m%d"))
+        # except:
+        #     self.df['SVC DATE'] = self.df['SVC DATE'].apply(
+        #         lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
+        #
+        # try:
+        #     self.df['DOB'] = self.df['DOB'].apply(lambda x: datetime.strptime(str(x), "%Y%m%d").strftime("%Y%m%d"))
+        # except:
+        #     self.df['DOB'] = self.df['DOB'].apply(
+        #         lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
+
+        self.transaction_num = self.df.__len__()
+        self.st_se_fixed_lines = 15
+
+        self.date_format1 = datetime.today().date().strftime("%y%m%d")  # used in ISA
+        self.date_format2 = datetime.today().date().strftime("%Y%m%d")
+        self.time_format = datetime.now().time().strftime("%H%M")
+        self.interchange_ctrl_number = "0" + str(self.date_format1) + str(self.time_format[2:])
+
+        self.version_code = info_locker.version_code['276']
+        self.submitter_info = info_locker.base_info
+        self.bill_provider = info_locker.base_info
+        self.receiver_info = info_locker.NYSDOH
+
+        self.file_name = '276-' + self.date_format2 + self.time_format + ".txt"
+
+    def ISA(self, prod=True):
+        if prod==False:
+
+            ISA = ["ISA", "00", " "*10, "00", " "*10, "ZZ", '{:<15s}'.format(self.submitter_info['ETIN']),
+                    "ZZ", '{:<15s}'.format(self.receiver_info['ETIN']), str(self.date_format1),
+                    str(self.time_format), '^', '00501', self.interchange_ctrl_number, '0', 'T', ':~']
+
+        else:
+
+            ISA = ["ISA", "00", " "*10, "00", " "*10, "ZZ", '{:<15s}'.format(self.submitter_info['ETIN']),
+                    "ZZ", '{:<15s}'.format(self.receiver_info['ETIN']), str(self.date_format1),
+                    str(self.time_format), '^', '00501', self.interchange_ctrl_number, '1', 'P', ':~']
+
+        return '*'.join(ISA)
+
+    def GS(self):
+        GS = ["GS", "HR", self.submitter_info['ETIN'], self.receiver_info['ETIN'], self.date_format2,
+              self.time_format, "1", "X", self.version_code]
+
+        return '*'.join(GS) + "~"
+
+    def transaction_header(self, iterations, invoice_number):
+        ST = ["ST", "276", str('{:>04d}'.format(iterations)), self.version_code]
+        BHT = ["BHT", "0010", "13", str(invoice_number).strip(), self.date_format2, self.time_format]
+
+        return '*'.join(ST) + "~" + '*'.join(BHT) + "~"
+
+    def first_HL(self): # payer info
+        HL = ["HL", "1", "", "20", "1"]
+        NM1 = ["NM1", "PR", "2", self.receiver_info['name'], "", "", "", "", "PI", self.receiver_info['id']]
+
+        return "*".join(HL) + "~" + "*".join(NM1) + "~"
+
+    def second_HL(self): # submitter info
+        HL = ["HL", "2", "1", "21", "1"]
+        NM1 = ['NM1', '41', '2', self.submitter_info['BaseName'], '', '', '', '', '46', self.submitter_info['ETIN']]
+
+        return "*".join(HL) + "~" + "*".join(NM1) + "~"
+
+    def third_HL(self): # PROVIDER INFO  SV: medicaid #, XX: NPI
+        HL = ['HL', '3', '2', '19', '1']
+        # print(self.bill_provider['MedicaidProviderNum'])
+        NM1 = ['NM1', '1P', '2', self.bill_provider['BaseName'], '', '', '', '', 'SV', self.bill_provider['MedicaidProviderNum']]
+
+        return "*".join(HL) + "~" + "*".join(NM1) + "~"
+
+    def fourth_HL(self, dob, gender, patient_lastname, patient_firstname, medicaid_number, claim_ctl_number, service_date, invoice_number):
+        HL = ['HL', '4', '3', '22', '0']
+        DMG = ['DMG', 'D8', str(dob), gender.upper()]
+        NM1 = ['NM1', 'IL', '1', patient_lastname.strip().upper(), patient_firstname.strip().upper(), '', '', '', 'MI', medicaid_number]
+        TRN = ['TRN', '1', str(invoice_number).strip()]
+        REF = ['REF', '1K', str(claim_ctl_number)]
+        DTP = ['DTP', '472', 'D8', service_date.__str__()]
+
+        return "*".join(HL) + '~' + "*".join(DMG) + "~" + "*".join(NM1) + "~" + "*".join(TRN) + "~" + "*".join(REF) + "~" + "*".join(DTP) + "~"
+
+    def transaction_trailer(self, iterations):
+        SE = ['SE', '15', str('{:>04d}'.format(iterations))]
+        return '*'.join(SE) + "~"
+
+    def GE(self, count_ST):
+        GE = ['GE', count_ST.__str__(), '1']
+        return '*'.join(GE) + '~'
+
+    def IEA(self):
+        IEA = ["IEA", "1", self.interchange_ctrl_number]
+
+        return "*".join(IEA) + "~"
+
+    def ST_SE_loop(self):
+
+        result = []
+        for row in range(self.transaction_num):
+            df_row = self.df.ix[[row]]
+            ST = self.transaction_header(iterations=row+1, invoice_number=df_row['INVOICE NUMBER'].values[0])
+            first_HL = self.first_HL()
+            second_HL = self.second_HL()
+            third_HL = self.third_HL()
+            fourth_HL = self.fourth_HL(dob=df_row['DOB'].values[0], gender=df_row['GENDER'].values[0],
+                                       patient_lastname=df_row['CLIENT LAST NAME'].values[0], patient_firstname=df_row['CLIENT FIRST NAME'].values[0],
+                                       medicaid_number=df_row['MEDICAID ID NUMBER'].values[0], claim_ctl_number=df_row['CLAIM CONTROL NUMBER'].values[0],
+                                       service_date=df_row['SVC DATE'].values[0], invoice_number=df_row['INVOICE NUMBER'].values[0])
+            SE = self.transaction_trailer(iterations=row+1)
+
+            merged_loop = ST + first_HL + second_HL + third_HL + fourth_HL + SE
+            result.append(merged_loop)
+
+        return ''.join(result)
+
+    def ISA_IEA(self):
+        ISA = self.ISA()
+        GS = self.GS()
+        ST_SE = self.ST_SE_loop()
+        GE = self.GE(self.transaction_num)
+        IEA = self.IEA()
+
+        return ISA + GS + ST_SE + GE + IEA
+
 
 if __name__ == '__main__':
 
     # sq = Sqlite_Methods('ProcedureCodes.db')
-    #
+    # # #
     # mileage = 20.9
     # pick_address = '25 PINE ST, New York, NY 10005'
     # drop_address = '430 LAKEVILLE RD, New York, NY 11042'
-    #
+    # # #
     # p = Process_Methods()
     # df = sq.get_procedureCode_Rule_to_df('Rule')
-    #
+    # # #
     # pick_poly = p.getPolygonIDs(pick_address)
     # drop_ploy = p.getPolygonIDs(drop_address)
-    #
+    # # #
     # codes, _ = p.generate_procedureCodes(df, mileage, pick_poly, drop_ploy)
     # print(codes)
     # print(sorted(set(codes), key=codes.index))
     # print(",".join(list(set(codes))))
 ####################
-    # p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
+    p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
 
     conn = sqlite3.connect('EDI.db')
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
     driver_df.set_index(['Fleet'], inplace=True)
     dict_driver_df = driver_df.to_dict('index')
     info_locker.driver_information = dict_driver_df if dict_driver_df else None
+
+    base_df = pd.read_sql("SELECT * FROM AllBases WHERE BaseName='CLEAN AIR CAR SERVICE AND PARKING COR'", conn)
+    dict_base_df = base_df.to_dict('records')
+    info_locker.base_info = dict_base_df[0] if dict_base_df else None
+
     # print(info_locker.driver_information)
 
     # y = Signoff().signoff('./2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
 
-    c = Compare_Signoff_PA('./2018-05-20/MAS Sign-off-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Roster-Export-2018-05-07-09-53-47.txt', './2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx')
+    # c = Compare_Signoff_PA('./2018-05-20/MAS Sign-off-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Roster-Export-2018-05-07-09-53-47.txt', './2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx')
     # c.compare_signoff_pa()
-    c.EDI_837_excel()
+    # c.EDI_837_excel()
+    # Process_Methods.generate_837('837 test.xlsx', delay_claim=False)
+    # Process_Methods.generate_270('MASRawVendor-31226-2018-03-28-11-06-36.txt')
+    # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
+    # Process_Methods.process_276_receipt('R180525165538.090001.x12', edi837='837P-1 Data-for-2018-04-30-to-2018-05-06 (1).xlsx')
