@@ -202,11 +202,16 @@ class Process_Methods():
         if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
 
         if if_address_in_cache != None:
+            '''If address is in the cache, then directly get the polygonIds.
+            '''
             result = if_address_in_cache[2]
             anti_process_result = [int(i) for i in result.split(',')]
             return anti_process_result
 
         else:
+            '''If address is not in the cache, then use MongoDB_Methods() to get polygonIds.
+            Then store this address into cache.
+            '''
             lng, lat = Process_Methods.google_address(address)
             # print(lng, lat)
             result = MongoDB_Methods(localhost=True).getPolygonID(lng=lng, lat=lat)
@@ -218,6 +223,13 @@ class Process_Methods():
 
     @staticmethod
     def frange(start, end, step):
+        '''
+        Float range function.
+        :param start:
+        :param end:
+        :param step:
+        :return:
+        '''
         while start < end:
             yield float('{0:.2f}'.format(start))
             start += step
@@ -225,13 +237,12 @@ class Process_Methods():
     @staticmethod
     def generate_procedureCodes(dataframe, mileage, pickup_poly, dropoff_poly, **kwargs):
         '''
-        Base on database to generate cooresponding codes
+        Base on rules in database to generate corresponding codes
         :param dataframe: Commonly call from 'get_procedureCode_Rule_to_df()'
         :param kwargs: mileage, pickup_polygonIDs, dropoff_polygonIDs, etc.
         :return: 1. A list, the codes should be used in this trip.
-                2. A dictionary type, contains code names and modifiers
+                2. A dictionary, it contains code names and modifiers
         '''
-
 
         result = []
         res_to_dict = {}
@@ -242,10 +253,12 @@ class Process_Methods():
             pickup = row['polygonID_pickup']
             dropoff = row['polygonID_dropoff']
 
+            # Rule 1 considers mileage.
             Rule1 = mileage in Process_Methods().frange(mileage_start, mileage_end, 0.01) if mileage_end > 0 else mileage > mileage_start
             if not Rule1:
                 continue
 
+            # Rule 2 considers pickup polygon.
             if pickup == 0:
                 Rule2 = True
             elif pickup > 0:
@@ -255,6 +268,7 @@ class Process_Methods():
             if not Rule2:
                 continue
 
+            # Rule 3 considers dropoff polygon.
             if dropoff == 0:
                 Rule3 = True
             elif dropoff > 0:
@@ -263,6 +277,10 @@ class Process_Methods():
                 Rule3 = True if -dropoff not in dropoff_poly else False
             if not Rule3:
                 continue
+
+            # Other Rules#
+
+
 
             result.append(row['CodeName'])
             res_to_dict[row['CodeName']] = {
@@ -304,7 +322,15 @@ class Process_Methods():
         stream_837data = edi.ISA_IEA()
         filename = edi.file_name + '.txt'
 
-        Process_Methods.write_to_txt(stream_837data, filename)
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        Process_Methods.write_to_txt(stream_837data, os.path.join(file_saving_path, filename))
 
     @staticmethod
     def generate_270(MAS_raw_file):
@@ -346,13 +372,22 @@ class Process_Methods():
         result_df['DOB'] = dob
         result_df['SVC DATE'] = service_date
 
-        result_df.to_excel('270-data-test.xlsx', index=False)
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        result_df.to_excel(os.path.join(file_saving_path, '270-data-' + str(datetime.today().date()) + str(datetime.now().time().strftime('%H%M%S')) + '.xlsx'),
+                           index=False)
 
         edi = EDI270(result_df)
         stream_270_data = edi.ISA_IEA()
         filename = edi.file_name
 
-        Process_Methods.write_to_txt(stream_270_data, filename)
+        Process_Methods.write_to_txt(stream_270_data, os.path.join(file_saving_path, filename))
 
     @staticmethod
     def process_271(receipt_file, lined_file=False):
@@ -646,15 +681,23 @@ class Process_Methods():
              'Other Payer2 name', 'Other Payer2 address', 'Other Payer2 tel.', 'Other Payer2 group number',
              'Other Payer policy number']]
 
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
         file_name_271 = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
-        result_df.to_excel('271-' + file_name_271 + '.xlsx', index=False)
+        result_df.to_excel(os.path.join(file_saving_path,'271-' + file_name_271 + '.xlsx'), index=False)
 
         SQ.upsert271(table='Eligibility271', data=result_df)   # Store all 271 eligibility result in Sqlite3
         PendingFromdf = result_df.loc[result_df['Eligibility Result'] == 'PENDING']
         PendingFromdf_cinList = PendingFromdf['CIN'].tolist()
         manual_df = SQ.generate_excel_from_manually271Lib(table='ManuallyCheck271', tofile=False)
         if manual_df.__len__() == 0:
-            print('Database ManuallyCheck271 is empty!')
+            print("No records in database!")
         else:
             eligibleFrom_manual_df_cinList = manual_df.loc[manual_df['Eligible'] == 'Eligible', 'CIN'].tolist()
             if eligibleFrom_manual_df_cinList.__len__() != 0:
@@ -663,7 +706,8 @@ class Process_Methods():
                         pendingCIN_idx = PendingFromdf.loc[PendingFromdf['CIN'] == pendingCIN].index.tolist()
                         PendingFromdf = PendingFromdf.drop(index=pendingCIN_idx)
 
-            PendingFromdf.to_excel('271Not eligible Trips.xlsx', index=False)
+            PendingFromdf.to_excel(os.path.join(file_saving_path, '271-Not eligible Trips' + file_name_271 + '.xlsx'),
+                                   index=False)
 
     @staticmethod
     def generate_276(receipt837_file, edi837_data, lined_file=False):
@@ -753,12 +797,22 @@ class Process_Methods():
         result_df = result_df[['INVOICE NUMBER', 'DOB', 'GENDER', 'CLIENT LAST NAME',
                                'CLIENT FIRST NAME', 'MEDICAID ID NUMBER', 'CLAIM CONTROL NUMBER', 'SVC DATE']]
 
-        result_df.to_excel('276-data.xlsx', index=False)
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        file_name_276data = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
+
+        result_df.to_excel(os.path.join(file_saving_path, '276-data-' + file_name_276data + '.xlsx'), index=False)
 
         edi = EDI276(result_df)
         stream_276_data = edi.ISA_IEA()
         filename = edi.file_name
-        Process_Methods.write_to_txt(stream_276_data, filename)
+        Process_Methods.write_to_txt(stream_276_data, os.path.join(file_saving_path, filename))
 
     @staticmethod
     def process_276_receipt(receipt_file, edi837=None, lined_file=False):
@@ -947,9 +1001,18 @@ class Process_Methods():
                  'Comparison Codes',
                  'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date']]
 
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
         file_name_276277 = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
 
-        result_df.to_excel('test276277.xlsx',index=False)
+        result_df.to_excel(os.path.join(file_saving_path, '276-277-' + file_name_276277 + '.xlsx'),
+                           index=False)
 
 
 class MongoDB_Methods():
@@ -1027,8 +1090,8 @@ class Sqlite_Methods():
 
     def get_procedureCode_Rule_to_df(self, table, *args):
         '''
-        Get cooresponding codes data from database.
-        Can use certain codes or all codes by default
+        Get corresponding codes data from database.
+        Can select certain codes or all codes by default
         :return: Dataframe
         '''
         if not args:
@@ -1183,7 +1246,7 @@ class Sqlite_Methods():
 
 class Process_MAS():
     def __init__(self, rawfile):
-        assert (rawfile.endswith('.txt')), "HOUSTON, WE'VE GOT A PROBLEM HERE! \nONLY PROCESS TXT-FORMAT FILE!"
+        assert (rawfile.endswith('.txt')), "HOUSTON, WE'VE GOT A PROBLEM HERE! \n   ONLY TXT-FORMAT FILE!"
         self.P = Process_Methods()
         self.SQ = Sqlite_Methods('ProcedureCodes.db')
 
@@ -1244,6 +1307,9 @@ class Process_MAS():
         ####### RULE DATAFRAME #########
         ####### SHOULD IMPROVE FOR DIFFERENT BASES AND RULES ##########
         ####### Applied to following function ##########
+        '''
+        This function should be improved with args.
+        '''
         Rule_df = self.SQ.get_procedureCode_Rule_to_df('Rule')
         ########################
 
@@ -1326,8 +1392,6 @@ class Signoff():
             mas_df = processedMAS
         else:
             mas_df = pd.read_excel(processedMAS)
-
-
 
         # Drop service type
         service_idx = mas_df.loc[mas_df['Record Type'] == 'Service'].index
@@ -2546,6 +2610,31 @@ class EDI276():
 
 if __name__ == '__main__':
 
+    fozu  = '''
+                   _ooOoo_
+                  o8888888o
+                  88" . "88
+                  (| -_- |)
+                  O\  =  /O
+               ____/`---'\____
+             .'  \|     |//  `.
+            /  \|||  :  |||//  |
+           /  _||||| -:- |||||- |
+           |   | |\  -  /// |   |
+           | \_|  ''\---/''  |   |
+           \  .-\__  `-`  ___/-. /
+         ___`. .'  /--.--\  `. . __
+      ."" '<  `.___\_<|>_/___.'  >'"".
+     | | :  `- \`.;`\ _ /`;.`/ - ` : | |
+     \  \ `-.   \_ __\ /__ _/   .-` /  /
+======`-.____`-.___\_____/___.-`____.-'======
+                   `=---='
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+         佛祖保佑             永无BUG
+'''
+    print(fozu)
+
+
     # sq = Sqlite_Methods('ProcedureCodes.db')
     # # #
     # mileage = 20.9
@@ -2563,7 +2652,7 @@ if __name__ == '__main__':
     # print(sorted(set(codes), key=codes.index))
     # print(",".join(list(set(codes))))
 ####################
-    p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
+    # p = Process_MAS('Vendor-31226-2018-05-07-09-55-59.txt')
 
     conn = sqlite3.connect('EDI.db')
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
