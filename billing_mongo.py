@@ -317,6 +317,18 @@ class Process_Methods():
         np.savetxt(output_name, df, delimiter=delimiter, fmt=fmt)
 
     @staticmethod
+    def string2bin(text):
+        return " ".join(format(ord(i), 'b') for i in text)
+
+    @staticmethod
+    def string2hex(text):
+        return "".join(format(ord(i),'02X') for i in text)
+
+    @staticmethod
+    def hex2string(text):
+        return bytearray.fromhex(text).decode()
+
+    @staticmethod
     def generate_837(file, delay_claim):
         edi = EDI837P(file, delay_claim)
         stream_837data = edi.ISA_IEA()
@@ -495,7 +507,6 @@ class Process_Methods():
                     eligible_code = 'Subscriber/insured not in group/plan identified'
                 else:
                     eligible_code = "AAA"
-
 
             elif row[0] == 'NM1' and row[1] == 'IL':
                 patient_lastname, patient_firstname, CIN = row[3], row[4], row[9]
@@ -1014,6 +1025,88 @@ class Process_Methods():
         result_df.to_excel(os.path.join(file_saving_path, '276-277-' + file_name_276277 + '.xlsx'),
                            index=False)
 
+    @staticmethod
+    def process_835(receipt_file, lined_file=False):
+        if lined_file==False:    # for raw receipt data
+            receipt_df = pd.read_csv(receipt_file, delimiter="~", header=None,)
+            receipt_df = receipt_df.transpose()
+            receipt_df.columns = ['line']
+            receipt_df['line'] = receipt_df['line'].dropna()
+        else:          # already split into lines
+            receipt_df = pd.read_csv(receipt_file)
+            receipt_df.columns = ['line']
+
+        receipt_df = receipt_df.dropna()
+        receipt_df['line_sep'] = receipt_df['line'].apply(lambda x: x.split("*"))
+
+        clp_idx = [l for l in range(receipt_df.__len__()) if receipt_df.ix[l, 1][0] == 'CLP'] + [receipt_df.__len__()]
+
+        invoice_number = []
+        expect_amount = []
+        paid_amount = []
+        claim_number = []
+        patient_ln = []
+        patient_fn = []
+        patient_medicaid = []
+        service_date = []
+
+        all_codes = []
+
+        for i in range(0, len(clp_idx)-1):
+            code = []
+
+            for r in range(clp_idx[i], clp_idx[i+1]):
+                row = receipt_df.ix[r, 1]
+                if row[0] == "CLP":
+                    invoice_number.append(row[1])
+                    expect_amount.append(float(row[3]))
+                    paid_amount.append(float(row[4]))
+                    claim_number.append(row[7])
+
+                elif row[0] == "NM1" and row[1] == "QC":
+                    patient_ln.append(row[3])
+                    patient_fn.append(row[4])
+                    patient_medicaid.append(row[9])
+
+                elif row[0] == 'DTM' and row[1] == "232":
+                    service_date.append(arrow.get(row[2], 'YYYYMMDD').format('MM/DD/YYYY'))
+
+                elif row[0] == 'SVC':
+                    code.append(row[1][3:])
+
+            all_codes.append(code)
+
+        # print(invoice_number.__len__(), all_codes.__len__())
+        result = pd.DataFrame()
+        result['Invoice Number'] = invoice_number
+        result['Claim Number'] = claim_number
+        result['Expected Amount'] = expect_amount
+        result['Paid Amount'] = paid_amount
+        result['Patient Firstname'] = patient_fn
+        result['Patient Lastname'] = patient_ln
+        result['Patient Medicaid'] = patient_medicaid
+        result['Service Date'] = service_date
+        result['Code'] = all_codes
+
+        last_line = len(result) + 1
+        result.ix[last_line, 'Claim Number'] = 'Total:'
+        result.ix[last_line, 'Expected Amount'] = sum(expect_amount)
+        result.ix[last_line, 'Paid Amount'] = sum(paid_amount)
+        result.ix[last_line, 'Patient Firstname'] = abs(result.ix[last_line, 'Expected Amount'] - result.ix[last_line, 'Paid Amount'])
+
+
+        file_name_835= str(arrow.get().date()) + str(datetime.now().time().strftime("%H%M%S"))
+
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        result.to_excel(os.path.join(file_saving_path, '835-Decoding-' + file_name_835 + '.xlsx'), index=False)
+
 
 class MongoDB_Methods():
     '''
@@ -1361,7 +1454,7 @@ class Process_MAS():
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
-        # basename = info_locker.base_info['BaseName']
+        basename = info_locker.base_info['BaseName']
         file_saving_path = os.path.join(current_path, daily_folder)
         if not os.path.exists(file_saving_path):
             os.makedirs(file_saving_path)
@@ -1450,7 +1543,7 @@ class Signoff():
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
-        # basename = info_locker.base_info['BaseName']
+        basename = info_locker.base_info['BaseName']
         file_saving_path = os.path.join(current_path, daily_folder)
         if not os.path.exists(file_saving_path):
             os.makedirs(file_saving_path)
@@ -1622,7 +1715,7 @@ class Signoff():
 
         # Merge
         print("GENERATING SIGN-OFF...PROGRESS 90%")
-        signoff_df = pd.concat([signoff_df, missed_trip_concat_to_signoff_df], 0)
+        signoff_df = pd.concat([signoff_df, missed_trip_concat_to_signoff_df], 0, sort=False)
         signoff_df = signoff_df[['SERVICE DAY', 'INVOICE ID', 'LEG ID', 'TOLL FEE', 'PROCEDURE CODE',
                                    'TRIP MILEAGE', 'PICK UP ADDRESS', 'PICK UP CITY', 'PICK UP ZIPCODE',
                                    'DROP OFF ADDRESS', 'DROP OFF CITY', 'DROP OFF ZIPCODE', 'PICK UP TIME',
@@ -1774,7 +1867,7 @@ class Compare_Signoff_PA():
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
-        # basename = info_locker.base_info['BaseName']
+        basename = info_locker.base_info['BaseName']
         file_saving_path = os.path.join(current_path, daily_folder)
         if not os.path.exists(file_saving_path):
             os.makedirs(file_saving_path)
@@ -1924,7 +2017,149 @@ class Compare_Signoff_PA():
             edi_837_dict[str(invoice_number)] = temp_dict
 
         edi_837_df = pd.DataFrame.from_dict(edi_837_dict, 'index')
+
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
         edi_837_df.to_excel('837 test.xlsx', index=False)
+
+
+class Correction_compare_with_PDF():
+    def __init__(self, correction_file, PDF):
+        self.signoff_compare_PA_file = correction_file
+        self.payment_raw_file = PDF
+
+    def check_PDF_payment(self):
+        new_compare_filename = re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', self.signoff_compare_PA_file)[0]
+        new_compare_filename = "Check Payment-" + new_compare_filename + '.xlsx'
+
+        def split_CIN_receipt(x):
+            # print(x)
+            splited = str(x).split(" ")
+            CIN, receipt_num = splited[0], splited[1]
+            receipt_num = receipt_num.replace("-", "")
+            return CIN, int(receipt_num)
+
+        def reverse_minus(x):
+
+            x = str(x)
+            if x[-1] == '-':
+                x = '-' + x.replace("-", '')
+                return float(x)
+            else:
+                return float(x)
+
+        def remove_leg_from_invoice_number(x):
+            if type(x) == str:
+                x = x[:-1]
+                return int(x)
+            else:
+                return x
+
+        payment_df = pd.read_excel(self.payment_raw_file, names=['useless', 'invoice number', 'patient name', 'CIN and receipt number', 'service date',
+                              'code', 'code unit', 'claim amount', 'paid amount', 'note'], header=None)
+
+        # payment_df.columns = ['useless', 'invoice number', 'patient name', 'CIN and receipt number', 'service date',
+        #                       'code', 'code unit', 'claim amount', 'paid amount', 'note']
+
+        payment_df['CIN'], payment_df['receipt number'] = zip(*payment_df['CIN and receipt number'].map(split_CIN_receipt))
+        payment_df = payment_df.drop(['CIN and receipt number'], axis=1)
+
+        payment_df['code unit'] = payment_df['code unit'].apply(lambda x: reverse_minus(x))
+        payment_df['claim amount'] = payment_df['claim amount'].apply(lambda x: reverse_minus(x))
+        payment_df['paid amount'] = payment_df['paid amount'].apply(lambda x: reverse_minus(x))
+        payment_df['service date'] = payment_df['service date'].apply(lambda x: datetime.strptime(str(x), "%Y-%m-%d %H:%M:%S").strftime('%m/%d/%Y'))
+        payment_df['invoice number'] = payment_df['invoice number'].apply(lambda x: remove_leg_from_invoice_number(x))
+        ##########################################################################################################
+
+        signoff_compare_PA_df = pd.read_excel(self.signoff_compare_PA_file)
+
+        signoff_compare_PA_df['Encode Payment'] = ""
+        signoff_compare_PA_df['Payment Paid Amt'] = ""
+        signoff_compare_PA_df['Payer Claim Number'] = ""
+        signoff_compare_PA_df['Signoff-Payment comparison'] = ""
+        signoff_compare_PA_df['Payment Result'] = ""
+
+        unique_invoice_number_payment = payment_df['invoice number'].unique().tolist()
+
+        for invoice_number in unique_invoice_number_payment:
+
+            idx_payment = payment_df.loc[payment_df['invoice number'] == invoice_number].index.tolist()
+            idx_signoff_compare_PA = signoff_compare_PA_df.loc[signoff_compare_PA_df['Invoice Number'] == invoice_number].index.tolist()
+
+            if idx_signoff_compare_PA.__len__() == 0:
+                continue
+            else:
+                signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payer Claim Number'] = payment_df.ix[idx_payment[0], 'receipt number']
+
+                temp_payment_code_dict = {}
+                temp_paid_amount = []
+
+                for i in idx_payment:
+
+                    temp_paid_amount.append(payment_df.ix[i, 'paid amount'])
+                    code = payment_df.ix[i, 'code']
+                    unit = payment_df.ix[i, 'code unit']
+                    temp_payment_code_dict[code] = unit
+
+                signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Encode Payment'] = str(temp_payment_code_dict)
+                signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payment Paid Amt'] = round(
+                    sum(temp_paid_amount), 2)
+
+                encoded_signoff = signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Encode Signoff']
+                if set(temp_payment_code_dict.items()) - set(literal_eval(encoded_signoff).items()) != set({}):
+                    signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Signoff-Payment comparison'] = 'DIFFERENT'
+                else:
+                    pass
+
+                if signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Signoff Total Amount'] <= signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payment Paid Amt']:
+                    signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payment Result'] = 'OKAY'
+                else:
+                    signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payment Result'] = 'DIFFERENT'
+
+        none_encode_payment_idx = signoff_compare_PA_df.loc[signoff_compare_PA_df['Encode Payment'] == ""].index.tolist()
+
+        for i in none_encode_payment_idx:
+            notFoundServiceDate = signoff_compare_PA_df.ix[i, 'Service Date']
+            notFoundCIN = signoff_compare_PA_df.ix[i, 'CIN']
+            maybeReplacedInvoice = payment_df.loc[((payment_df['CIN'] == notFoundCIN) & (payment_df['service date'] == notFoundServiceDate)), 'invoice number'].tolist()
+
+            if maybeReplacedInvoice.__len__() == 0:
+                signoff_compare_PA_df.ix[i, 'Payment Result'] = 'Not Found'
+
+            else:
+                # print(maybeReplacedInvoice[0])
+                idx_maybeReplacedInvoice = payment_df.loc[payment_df['invoice number'] == maybeReplacedInvoice[0]].index.tolist()
+                replacedReceiptNumber = payment_df.ix[idx_maybeReplacedInvoice[0], 'receipt number']
+                replacedPaidamount = [payment_df.ix[r, 'paid amount'] for r in idx_maybeReplacedInvoice]
+                replacedTotalPaidAmount = round(sum(replacedPaidamount), 2)
+
+                signoff_compare_PA_df.ix[i, 'Payment Result'] = 'Replaced ' + str(maybeReplacedInvoice[0])
+                signoff_compare_PA_df.ix[i, 'Payer Claim Number'] = replacedReceiptNumber
+                signoff_compare_PA_df.ix[i, 'Payment Paid Amt'] = replacedTotalPaidAmount
+
+
+        orderedColumns = ['Service Date', 'Invoice Number', 'PA Number', 'Encode PA', 'Encode Signoff',
+                          'Comparison', 'Encode Payment', 'Signoff-Payment comparison', 'Signoff Amount Without Toll',
+                          'Signoff Tollfee', 'Signoff Total Amount', 'Payment Paid Amt', 'Payment Result',
+                          'Payer Claim Number', 'CIN', 'Driver ID', 'Vehicle ID', 'Service NPI']
+
+        signoff_compare_PA_df = signoff_compare_PA_df[orderedColumns]
+
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        signoff_compare_PA_df.to_excel(os.path.join(file_saving_path, new_compare_filename), index=False)
 
 
 class EDI837P():
@@ -2632,11 +2867,10 @@ if __name__ == '__main__':
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
          佛祖保佑             永无BUG
 '''
-    print(fozu)
-
+    # print(fozu)
 
     # sq = Sqlite_Methods('ProcedureCodes.db')
-    # # #
+    #
     # mileage = 20.9
     # pick_address = '25 PINE ST, New York, NY 10005'
     # drop_address = '430 LAKEVILLE RD, New York, NY 11042'
@@ -2652,7 +2886,7 @@ if __name__ == '__main__':
     # print(sorted(set(codes), key=codes.index))
     # print(",".join(list(set(codes))))
 ####################
-    # p = Process_MAS('Vendor-31226-2018-05-07-09-55-59.txt')
+    # p = Process_MAS('./TestData/Vendor-31226-2018-04-16-13-00-58.txt')
 
     conn = sqlite3.connect('EDI.db')
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
@@ -2666,12 +2900,15 @@ if __name__ == '__main__':
 
     # print(info_locker.driver_information)
 
-    # y = Signoff().signoff('./2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
+    # y = Signoff().signoff('./2018-06-12/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
 
-    # c = Compare_Signoff_PA('./2018-05-20/MAS Sign-off-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Roster-Export-2018-05-07-09-53-47.txt', './2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx')
+    # c = Compare_Signoff_PA('./2018-06-12/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx', './TestData/Roster-Export-2018-04-16-13-15-24.txt')
     # c.compare_signoff_pa()
     # c.EDI_837_excel()
     # Process_Methods.generate_837('837 test.xlsx', delay_claim=False)
-    # Process_Methods.generate_270('MASRawVendor-31226-2018-03-28-11-06-36.txt')
+    # Process_Methods.generate_270('./TestData/Vendor-31226-2018-05-07-09-55-59.txt')
     # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
     # Process_Methods.process_276_receipt('R180525165538.090001.x12', edi837='837P-1 Data-for-2018-04-30-to-2018-05-06 (1).xlsx')
+
+    c = Correction_compare_with_PDF('./2018-06-12/MAS Correction-2018-01-01-to-2018-01-31.xlsx', './TestData/NEW_Jan-March 2018 Payment new .xlsx')
+    c.check_PDF_payment()
