@@ -30,6 +30,9 @@ from ast import literal_eval
 from collections import Counter, OrderedDict
 import arrow
 import xml.etree.ElementTree as ET
+import logging
+pd.options.mode.chained_assignment = None
+logging.getLogger().setLevel(logging.INFO)      # Set logging level to logging.INFO, otherwise would only display warning level.
 
 
 def CleanAddress(func):
@@ -549,7 +552,10 @@ class Process_Methods():
 
                 address = address_row1[1] + " " + address_row2[1] + " " + address_row2[2] + " " + address_row2[3]
                 # contact_name = contact_row[2]
-                contact_tel = contact_row[4]
+                try:
+                    contact_tel = contact_row[4]
+                except:
+                    contact_tel = '0000000000'
 
             elif row[0] == 'NM1' and row[1] == 'P4':
                 other_payer_name.append(row[3])
@@ -1355,11 +1361,11 @@ class Sqlite_Methods():
 
 class Process_MAS():
     def __init__(self, rawfile):
-        assert (rawfile.endswith('.txt')), "HOUSTON, WE'VE GOT A PROBLEM HERE! \n   ONLY TXT-FORMAT FILE!"
+        # assert (rawfile.endswith('.txt')), "HOUSTON, WE'VE GOT A PROBLEM HERE! \n   ONLY TXT-FORMAT FILE!"
         self.P = Process_Methods()
         self.SQ = Sqlite_Methods('ProcedureCodes.db')
 
-        self.raw_df = pd.read_table(rawfile)
+        self.raw_df = pd.read_table(rawfile) if rawfile.endswith('.txt') else pd.read_excel(rawfile)
         self.raw_df['Pick-up Zip'] = self.raw_df['Pick-up Zip'].fillna(0)
         self.raw_df['Drop-off Zip'] = self.raw_df['Drop-off Zip'].fillna(0)
         # pre-process address first
@@ -1405,15 +1411,14 @@ class Process_MAS():
         temp_df = pd.DataFrame()  # for cache usage
 
         # Change logic to Leg_ID
-        raw_df = self.Add_abcd_legs()
-        # raw_df = self.raw_df
+        # raw_df = self.Add_abcd_legs()
+        raw_df = self.raw_df
 
         raw_df['processed_pickup_address'] = raw_df['Pick-up Address'] + ", " + raw_df['Pick-up City'] + ", " + \
                                              raw_df['Pick-up State'] + " " + raw_df['Pick-up Zip']
 
         raw_df['processed_dropoff_address'] = raw_df['Drop-off Address'] + ", " + raw_df['Drop-off City'] + ", " + \
                                              raw_df['Drop-off State'] + " " + raw_df['Drop-off Zip']
-
 
         ####### TO DO #########
         ####### RULE DATAFRAME #########
@@ -1450,7 +1455,8 @@ class Process_MAS():
             count += 1
             if count % display_flag == 0:
                 progress = int(round(count / count_legs, 1) * 100)
-                print(f'PROCEDURE CODES ARE ADDING TO TRIPS......{progress}% COMPLETED.')
+                # print(f'PROCEDURE CODES ARE ADDING TO TRIPS......{progress}% COMPLETED.')
+                logging.info(f'\nPROCEDURE CODES ARE ADDING TO TRIPS......{progress}% COMPLETED.')
 
         temp_df['service_date'] = raw_df['Service Starts'].apply(lambda x: datetime.strptime(x, '%m/%d/%Y').date())
 
@@ -1557,7 +1563,6 @@ class Signoff():
         totalJob_df.to_excel(os.path.join(file_saving_path,
                                            f'Difference_Totaljobs&Claims_{datetime.today().date()}_{datetime.now().time().strftime("%H%M%S")}.xlsx'),
                               index=False)
-
 
         # Processing Functions #
 
@@ -1742,6 +1747,7 @@ class Signoff():
                                          'MAS Sign-off-{0}-to-{1}.xlsx'.format(self.min_service_date, self.max_service_date)),
                             index=False)
         print("SIGN-OFF FILE GENERATED!")
+        return signoff_df
 
 
 class Compare_Signoff_PA():
@@ -2171,13 +2177,13 @@ class Correction_compare_with_PDF():
 
 class EDI837P():
 
-    def __init__(self, file, delayed_claim=False):
-        self.delayed_claim = delayed_claim
+    def __init__(self, file, replace=False):
+        self.replace = replace
         self.df = pd.read_csv(file, dtype=object) if file[-1] == 'v' else pd.read_excel(file, dtype=object)
         # self.df = self.df.fillna("")
 
-        self.df['service date'] = self.df['service date'].apply(lambda x: arrow.get(str(x), ['MM/DD/YYYY', 'YYYY-MM-DD HH:mm:ss']).format('YYYYMMDD'))
-        self.df['patient dob'] = self.df['patient dob'].apply(lambda x: arrow.get(str(x), ['MM/DD/YYYY', 'YYYY-MM-DD HH:mm:ss']).format('YYYYMMDD'))
+        self.df['service date'] = self.df['service date'].apply(lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
+        self.df['patient dob'] = self.df['patient dob'].apply(lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
         self.df['patient pregnant'] = self.df['patient pregnant'].apply(lambda x: x == "Y")
 
         self.transaction_num = self.df.__len__()
@@ -2197,7 +2203,16 @@ class EDI837P():
         # self.file_name = self.interchange_ctrl_number + '.txt'
         self.all_invoice_number = []
         self.invoice_ST_SE_dict = {}
-        self.file_name = '837-' + re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file)[0]  if re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file).__len__() != 0 else '837-' + str(datetime.today().date())
+        if self.replace:
+            self.file_name = '837-Replace-' + re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file)[0] if re.findall(
+                r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file).__len__() != 0 else '837-' + str(
+                datetime.today().date())
+        else:
+            self.file_name = '837-' + re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file)[0]  if re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file).__len__() != 0 else '837-' + str(datetime.today().date())
+
+
+        self.today_datetime = arrow.now().datetime
+        self.delayDate_line = arrow.now().shift(days=-90).datetime
 
     def ISA(self, prod=True):
         if prod==False:
@@ -2293,20 +2308,31 @@ class EDI837P():
 
         return '*'.join(NM1) + "~" + '*'.join(N3) + "~" + '*'.join(N4) + "~" + '*'.join(REF1) + "~" + '*'.join(REF2) + "~"
 
-    def loop2300(self, invoice_number, amount, pa_num): #claim info
+    def loop2300(self, invoice_number, amount, pa_num, delay_claim=False, payer_control_num=None): #claim info
         if amount == "":
             amount = "0"
         if pa_num == "":
             pa_num = 0
 
-        if self.delayed_claim == True:
-            CLM = ["CLM", str(invoice_number), str(amount), "", "", "99:B:1", "Y", "A", "Y", "Y", "P", "","","","","","","","","","11"]
+        if self.replace == False:
+            replace_code = '99:B:1'
         else:
-            CLM = ["CLM", str(invoice_number), str(amount), "", "", "99:B:1", "Y", "A", "Y", "Y", "P"]
+            replace_code = '99:B:7'
+
+        if delay_claim == True:
+            CLM = ["CLM", str(invoice_number), str(amount), "", "", replace_code, "Y", "A", "Y", "Y", "P", "","","","","","","","","","11"]
+        else:
+            CLM = ["CLM", str(invoice_number), str(amount), "", "", replace_code, "Y", "A", "Y", "Y", "P"]
+
+
         REF = ['REF', "G1", str('{:>011d}'.format(int(pa_num)))]
         HI = ["HI", "ABK:R69"]
 
-        return '*'.join(CLM) + "~" + '*'.join(REF) + "~" + '*'.join(HI) + "~"
+        if self.replace == False:
+            return '*'.join(CLM) + "~" + '*'.join(REF) + "~" + '*'.join(HI) + "~"
+        else:
+            REF_replace = ['REF', 'F8', str(payer_control_num)]
+            return '*'.join(CLM) + "~" + '*'.join(REF_replace) + '~' + '*'.join(REF) + "~" + '*'.join(HI) + "~"
 
     def loop2310a(self, driver_first, driver_last, driver_lic, service_name, service_NPI): #referring provider
         if driver_first == "":
@@ -2536,6 +2562,12 @@ class EDI837P():
             self.lx_lines = 0
             df_row = self.df.ix[[row]]   # get row data
 
+            service_date = df_row['service date'].values[0]
+            arrow_serviceDate = arrow.get(service_date, 'YYYYMMDD').datetime
+
+            delayClaim_switch = True if arrow_serviceDate <= self.delayDate_line else False
+            payerControlNum = df_row['payer control number'].values[0] if delayClaim_switch == True else None
+
             ST = self.transaction_header(iterations=row+1, invoice_number= df_row['invoice number'].values[0])
             loop1000a = self.loop1000a()
             loop1000b = self.loop1000b()
@@ -2546,7 +2578,7 @@ class EDI837P():
                                          address=df_row['patient address'].values[0], city=df_row['patient city'].values[0], state=df_row['patient state'].values[0],
                                          zipcode=df_row['patient zip code'].values[0], dob=df_row['patient dob'].values[0], gender=df_row['patient gender'].values[0])
             loop2010bb = self.loop2010bb()
-            loop2300 = self.loop2300(invoice_number=df_row['invoice number'].values[0], amount=df_row['claim_amount'].values[0], pa_num=df_row['pa number'].values[0])
+            loop2300 = self.loop2300(invoice_number=df_row['invoice number'].values[0], amount=df_row['claim_amount'].values[0], pa_num=df_row['pa number'].values[0], delay_claim=delayClaim_switch, payer_control_num=payerControlNum)
             loop2310a = self.loop2310a(driver_first=df_row['driver first name'].values[0], driver_last=df_row['driver last name'].values[0],
                                        driver_lic=df_row['driver license number'].values[0], service_name=df_row['service facility name'].values[0],
                                        service_NPI=df_row['service npi'].values[0])
@@ -2999,7 +3031,8 @@ class MASProtocol():
             correct = root.findall('.//InvoicesCorrect')[0].text
             error = root.findall('.//InvoiceErrors')[0].text
 
-            print(f'Success: {correct};\nFailure (Or already attested): {error}')
+            # print(f'Success: {correct};\nFailure (Or already attested): {error}')
+            logging.info(f'\nSuccess: {correct};\nFailure (Or already attested): {error}')
 
         except ValueError:
             raise
@@ -3068,7 +3101,7 @@ if __name__ == '__main__':
     dict_base_df = base_df.to_dict('records')
     info_locker.base_info = dict_base_df[0] if dict_base_df else None
 
-    # p = Process_MAS('Vendor-31226-2018-06-26-17-04-18.txt')
+    p = Process_MAS('Processed Vendor.xlsx')
 
     # print(info_locker.driver_information)
 
