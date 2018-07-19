@@ -73,8 +73,8 @@ def Google(func):
         :param address: string type
         :return: Return geo points (lng, lat)
         '''
-        sq = Sqlite_Methods('ProcedureCodes.db')
-        if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
+        sq = Sqlite_Methods('EX.db')
+        if_address_in_cache = sq.check_address_in_cache('addressCache', address)
         if if_address_in_cache != None:
 
             return if_address_in_cache[0], if_address_in_cache[1]
@@ -103,8 +103,7 @@ def Google(func):
     return wrapper
 
 
-class info_locker(object):
-
+class info_locker():
     driver_information = None
     base_info = None
 
@@ -140,8 +139,8 @@ class Process_Methods():
         :param address: string type
         :return: Return geo points (lng, lat)
         '''
-        sq = Sqlite_Methods('ProcedureCodes.db')
-        if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
+        sq = Sqlite_Methods('EX.db')
+        if_address_in_cache = sq.check_address_in_cache('addressCache', address)
         if if_address_in_cache != None:
 
             return if_address_in_cache[0], if_address_in_cache[1]
@@ -202,8 +201,8 @@ class Process_Methods():
 
     @staticmethod
     def getPolygonIDs(address):
-        sq = Sqlite_Methods('ProcedureCodes.db')
-        if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
+        sq = Sqlite_Methods('EX.db')
+        if_address_in_cache = sq.check_address_in_cache('addressCache', address)
 
         if if_address_in_cache != None:
             '''If address is in the cache, then directly get the polygonIds.
@@ -222,7 +221,7 @@ class Process_Methods():
             result = MongoDB_Methods(localhost=True).getPolygonID(lng=lng, lat=lat)
             # print(result)
             process_result = ','.join(map(str, result))
-            sq.upsert_address_cache('address_cache_test', address, lng, lat, process_result)
+            sq.upsert_address_cache('addressCache', address, lng, lat, process_result)
             print(f'HOUSTON! {address} IS RECORDED!')
             return result
 
@@ -325,15 +324,15 @@ class Process_Methods():
 
     @staticmethod
     def string2hex(text):
-        return "".join(format(ord(i),'02X') for i in text)
+        return "".join(format(ord(i), '02X') for i in text)
 
     @staticmethod
     def hex2string(text):
         return bytearray.fromhex(text).decode()
 
     @staticmethod
-    def generate_837(file, delay_claim):
-        edi = EDI837P(file, delay_claim)
+    def generate_837(file):
+        edi = EDI837P(file)
         stream_837data = edi.ISA_IEA()
         filename = edi.file_name + '.txt'
 
@@ -418,7 +417,7 @@ class Process_Methods():
         :return:
         '''
 
-        SQ =Sqlite_Methods('EDI.db')  # connect to sqlite3
+        SQ =Sqlite_Methods('EX.db')  # connect to sqlite3
 
         if lined_file == False:  # for raw receipt data
             receipt_df = pd.read_csv(receipt_file, delimiter="~", header=None, )
@@ -864,7 +863,7 @@ class Process_Methods():
             edi837_df = pd.read_excel(edi837)
             edi837_df['invoice number'] = edi837_df['invoice number'].astype(str)
 
-        SQ = Sqlite_Methods('ProcedureCodes.db')
+        SQ = Sqlite_Methods('EX.db')
 
         result_dict = {}
         temp_dict = {}
@@ -979,8 +978,7 @@ class Process_Methods():
                         'Patient Firstname': patient_firstname,
                         'CIN': CIN,
                         'Claim Ctrl Number': claim_ctrl_num,
-                        'P1 Total Expected Amt': claim_amount,
-                        'P2 Total Expected Amt': total_expected_amt,
+                        'Total Expected Amt': total_expected_amt,
                         'Total Paid Amt': total_paid_amt,
                         'Service Date': service_date,
                         'Comparison Codes': str(embedded_code_dict),
@@ -997,7 +995,7 @@ class Process_Methods():
                         'Patient Firstname': patient_firstname,
                         'CIN': CIN,
                         'Claim Ctrl Number': claim_ctrl_num,
-                        'P2 Total Expected Amt': total_expected_amt,
+                        'Total Expected Amt': total_expected_amt,
                         'Total Paid Amt': total_paid_amt,
                         'Service Date': service_date,
                         'Comparison Codes': str(embedded_code_dict),
@@ -1024,12 +1022,12 @@ class Process_Methods():
         result_df = pd.DataFrame(result_dict)
         result_df = result_df.transpose()
         if edi837:
-            result_df = result_df[['Invoice Number', 'Result', 'P1 Total Expected Amt', 'P2 Total Expected Amt', 'Total Paid Amt', 'Comparison Codes',
+            result_df = result_df[['Invoice Number', 'Result', 'Total Expected Amt', 'Total Paid Amt', 'Comparison Codes',
                                'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date', 'NPI', 'DRIVER ID', 'VEHICLE ID']]
 
         else:
             result_df = result_df[
-                ['Invoice Number', 'Result', 'P2 Total Expected Amt', 'Total Paid Amt',
+                ['Invoice Number', 'Result', 'Total Expected Amt', 'Total Paid Amt',
                  'Comparison Codes',
                  'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date']]
 
@@ -1363,7 +1361,7 @@ class Process_MAS():
     def __init__(self, rawfile):
         # assert (rawfile.endswith('.txt')), "HOUSTON, WE'VE GOT A PROBLEM HERE! \n   ONLY TXT-FORMAT FILE!"
         self.P = Process_Methods()
-        self.SQ = Sqlite_Methods('ProcedureCodes.db')
+        self.SQ = Sqlite_Methods('EX.db')
 
         self.raw_df = pd.read_table(rawfile) if rawfile.endswith('.txt') else pd.read_excel(rawfile)
         self.raw_df['Pick-up Zip'] = self.raw_df['Pick-up Zip'].fillna(0)
@@ -1411,8 +1409,8 @@ class Process_MAS():
         temp_df = pd.DataFrame()  # for cache usage
 
         # Change logic to Leg_ID
-        # raw_df = self.Add_abcd_legs()
-        raw_df = self.raw_df
+        raw_df = self.Add_abcd_legs()
+        # raw_df = self.raw_df
 
         raw_df['processed_pickup_address'] = raw_df['Pick-up Address'] + ", " + raw_df['Pick-up City'] + ", " + \
                                              raw_df['Pick-up State'] + " " + raw_df['Pick-up Zip']
@@ -1493,7 +1491,7 @@ class Process_MAS():
 
 class Signoff():
     def __init__(self):
-        self.sq = Sqlite_Methods('ProcedureCodes.db')
+        self.sq = Sqlite_Methods('EX.db')
 
     def signoff(self, processedMAS, TotalJob):
         print('LOADING FILES...PROGRESS 20%')
@@ -1761,7 +1759,7 @@ class Compare_Signoff_PA():
         self.PA_df['Invoice Number'] = self.PA_df['Invoice Number'].astype(str)
 
         self.signoff_df = self.signoff_df.loc[self.signoff_df['LEG STATUS'] == 0]
-        self.sq = Sqlite_Methods('ProcedureCodes.db')
+        self.sq = Sqlite_Methods('EX.db')
 
     def compare_signoff_pa(self):
         unique_invoice_number_in_signoff = self.signoff_df['INVOICE ID'].unique().tolist()
@@ -1852,7 +1850,6 @@ class Compare_Signoff_PA():
 
                 signoff_code_list.append(str(dict(counter_signoff_codes)))
                 signoff_tollfee_list.append(sum(signoff_tollfee))
-
 
         missed_trips_df['MISSED TRIPS'] = missed_trips
         correction_df = pd.DataFrame()
@@ -2310,7 +2307,7 @@ class EDI837P():
 
     def loop2300(self, invoice_number, amount, pa_num, delay_claim=False, payer_control_num=None): #claim info
         if amount == "":
-            amount = "0"
+            amount = 0
         if pa_num == "":
             pa_num = 0
 
@@ -2320,9 +2317,9 @@ class EDI837P():
             replace_code = '99:B:7'
 
         if delay_claim == True:
-            CLM = ["CLM", str(invoice_number), str(amount), "", "", replace_code, "Y", "A", "Y", "Y", "P", "","","","","","","","","","11"]
+            CLM = ["CLM", str(invoice_number), format(amount, '.2f'), "", "", replace_code, "Y", "A", "Y", "Y", "P", "","","","","","","","","","11"]
         else:
-            CLM = ["CLM", str(invoice_number), str(amount), "", "", replace_code, "Y", "A", "Y", "Y", "P"]
+            CLM = ["CLM", str(invoice_number), format(amount, '.2f'), "", "", replace_code, "Y", "A", "Y", "Y", "P"]
 
 
         REF = ['REF', "G1", str('{:>011d}'.format(int(pa_num)))]
@@ -2566,7 +2563,7 @@ class EDI837P():
             arrow_serviceDate = arrow.get(service_date, 'YYYYMMDD').datetime
 
             delayClaim_switch = True if arrow_serviceDate <= self.delayDate_line else False
-            payerControlNum = df_row['payer control number'].values[0] if delayClaim_switch == True else None
+            payerControlNum = df_row['payer control number'].values[0] if self.replace == True else None
 
             ST = self.transaction_header(iterations=row+1, invoice_number= df_row['invoice number'].values[0])
             loop1000a = self.loop1000a()
@@ -3091,7 +3088,7 @@ if __name__ == '__main__':
 ####################
 
 
-    conn = sqlite3.connect('EDI.db')
+    conn = sqlite3.connect('EX.db')
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
     driver_df.set_index(['Fleet'], inplace=True)
     dict_driver_df = driver_df.to_dict('index')
@@ -3101,16 +3098,16 @@ if __name__ == '__main__':
     dict_base_df = base_df.to_dict('records')
     info_locker.base_info = dict_base_df[0] if dict_base_df else None
 
-    p = Process_MAS('Processed Vendor.xlsx')
+    # p = Process_MAS('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
 
     # print(info_locker.driver_information)
 
-    # y = Signoff().signoff('./CLEAN AIR CAR SERVICE AND PARKING COR/2018-06-14/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
+    # y = Signoff().signoff('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-16/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
 
-    # c = Compare_Signoff_PA('./2018-06-12/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx', './TestData/Roster-Export-2018-04-16-13-15-24.txt', './2018-06-12/Processed MAS-2018-01-01-to-2018-01-31.xlsx')
+    # c = Compare_Signoff_PA('MAS Sign-off-2018-06-06-to-2018-06-30.xlsx', 'Roster-Export-2018-07-12-16-15-19.txt', 'Processed MAS-2018-06-06-to-2018-06-30.xlsx')
     # c.compare_signoff_pa()
     # c.EDI_837_excel()
-    # Process_Methods.generate_837('837 test.xlsx', delay_claim=False)
+    # Process_Methods.generate_837('837P-2 Data-for-2018-06-04-to-2018-06-10.xlsx')
     # Process_Methods.generate_270('./TestData/Vendor-31226-2018-05-07-09-55-59.txt')
     # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
     # Process_Methods.process_276_receipt('R180525165538.090001.x12', edi837='837P-1 Data-for-2018-04-30-to-2018-05-06 (1).xlsx')
