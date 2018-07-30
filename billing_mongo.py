@@ -1107,10 +1107,25 @@ class Process_Methods():
         result['Service Date'] = service_date
         result['Code'] = all_codes
 
+
+        uniqueInvoice = result['Invoice Number'].unique().tolist()
+        for i in uniqueInvoice:
+            idx_result = result.loc[result['Invoice Number'] == i].index.tolist()
+
+            if all(result.ix[idx, 'Paid Amount'] == 0 for idx in idx_result) and idx_result.__len__() > 1:
+                result = result.drop(idx_result[1:])
+
+            else:
+                result = result.drop(idx for idx in idx_result if result.ix[idx, 'Paid Amount'] == 0 and idx_result.__len__() > 1)
+
+        expect_amount_value = sum(result['Expected Amount'].tolist())
+        paid_amount_value = sum(result['Paid Amount'].tolist())
+
+
         last_line = len(result) + 1
         result.ix[last_line, 'Claim Number'] = 'Total:'
-        result.ix[last_line, 'Expected Amount'] = sum(expect_amount)
-        result.ix[last_line, 'Paid Amount'] = sum(paid_amount)
+        result.ix[last_line, 'Expected Amount'] = expect_amount_value
+        result.ix[last_line, 'Paid Amount'] = paid_amount_value
         result.ix[last_line, 'Patient Firstname'] = abs(result.ix[last_line, 'Expected Amount'] - result.ix[last_line, 'Paid Amount'])
 
 
@@ -1454,7 +1469,7 @@ class Process_MAS():
             if count % display_flag == 0:
                 progress = int(round(count / count_legs, 1) * 100)
                 # print(f'PROCEDURE CODES ARE ADDING TO TRIPS......{progress}% COMPLETED.')
-                logging.info(f'\nPROCEDURE CODES ARE ADDING TO TRIPS......{progress}% COMPLETED.')
+                logging.info(f'\nPROCEDURE CODES ARE ADDING TO TRIPS-->{progress}% COMPLETED.')
 
         temp_df['service_date'] = raw_df['Service Starts'].apply(lambda x: datetime.strptime(x, '%m/%d/%Y').date())
 
@@ -1851,6 +1866,7 @@ class Compare_Signoff_PA():
                 signoff_code_list.append(str(dict(counter_signoff_codes)))
                 signoff_tollfee_list.append(sum(signoff_tollfee))
 
+        logging.info('GENERATING MAS CORRECTION FILE...')
         missed_trips_df['MISSED TRIPS'] = missed_trips
         correction_df = pd.DataFrame()
         correction_df['Service Date'] = service_data_list
@@ -1889,10 +1905,13 @@ class Compare_Signoff_PA():
                                index=False)
 
         if missed_trips_df.__len__() != 0:
+            logging.info(f'{len(missed_trips)} MISSING TRIPS FOUND. \n'
+                         f'GENERATING TO REPORT...')
+
             current_path = os.getcwd()
             daily_folder = str(datetime.today().date())
-            # basename = info_locker.base_info['BaseName']
-            file_saving_path = os.path.join(current_path, daily_folder)
+            basename = info_locker.base_info['BaseName']
+            file_saving_path = os.path.join(current_path, basename, daily_folder)
             if not os.path.exists(file_saving_path):
                 os.makedirs(file_saving_path)
                 print('Save files to {0}'.format(file_saving_path))
@@ -1908,8 +1927,15 @@ class Compare_Signoff_PA():
         self.correction_df = self.compare_signoff_pa()
         correction_invoice_number = self.correction_df['Invoice Number'].tolist()
 
+        # Count
+        length_invoice_number = len(correction_invoice_number)
+        displayFlag = int(round(length_invoice_number / 10))
+        flagCount = 0
+
         edi_837_dict = {}
+        logging.info('SETTING UP 837 TEMPLATE...')
         for invoice_number in correction_invoice_number:
+
             temp_dict = OrderedDict([
                 ('patient last name', ""),
                 ('patient first name', ""),
@@ -2027,17 +2053,25 @@ class Compare_Signoff_PA():
 
             edi_837_dict[str(invoice_number)] = temp_dict
 
+            flagCount += 1
+
+            if flagCount % displayFlag == 0:
+                progress = int(round(flagCount / length_invoice_number, 1) * 100)
+                logging.info(f'FILLING UP 837 DATA-->{progress}% COMPLETED.')
+
+
         edi_837_df = pd.DataFrame.from_dict(edi_837_dict, 'index')
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
-        # basename = info_locker.base_info['BaseName']
-        file_saving_path = os.path.join(current_path, daily_folder)
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
         if not os.path.exists(file_saving_path):
             os.makedirs(file_saving_path)
             print('Save files to {0}'.format(file_saving_path))
 
-        edi_837_df.to_excel('837 test.xlsx', index=False)
+        logging.info('GENERATING 837 DATA FILE...')
+        edi_837_df.to_excel(os.path.join(file_saving_path, '837P Data-for-{0}-to-{1}.xlsx'.format(self.min_service_date, self.max_service_date)), index=False)
 
 
 class Correction_compare_with_PDF():
@@ -2179,8 +2213,10 @@ class EDI837P():
         self.df = pd.read_csv(file, dtype=object) if file[-1] == 'v' else pd.read_excel(file, dtype=object)
         # self.df = self.df.fillna("")
 
-        self.df['service date'] = self.df['service date'].apply(lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
-        self.df['patient dob'] = self.df['patient dob'].apply(lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
+        # self.df['service date'] = self.df['service date'].apply(lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
+        # self.df['patient dob'] = self.df['patient dob'].apply(lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
+        self.df['service date'] = self.df['service date'].apply(lambda x: arrow.get(str(x), ['YYYY-MM-DD HH:mm:ss', 'MM/DD/YYYY']).format('YYYYMMDD'))
+        self.df['patient dob'] = self.df['patient dob'].apply(lambda x: arrow.get(str(x), ['YYYY-MM-DD HH:mm:ss', 'MM/DD/YYYY']).format('YYYYMMDD'))
         self.df['patient pregnant'] = self.df['patient pregnant'].apply(lambda x: x == "Y")
 
         self.transaction_num = self.df.__len__()
@@ -2206,7 +2242,6 @@ class EDI837P():
                 datetime.today().date())
         else:
             self.file_name = '837-' + re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file)[0]  if re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file).__len__() != 0 else '837-' + str(datetime.today().date())
-
 
         self.today_datetime = arrow.now().datetime
         self.delayDate_line = arrow.now().shift(days=-90).datetime
@@ -3087,7 +3122,6 @@ if __name__ == '__main__':
     # print(",".join(list(set(codes))))
 ####################
 
-
     conn = sqlite3.connect('EX.db')
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
     driver_df.set_index(['Fleet'], inplace=True)
@@ -3102,15 +3136,16 @@ if __name__ == '__main__':
 
     # print(info_locker.driver_information)
 
-    # y = Signoff().signoff('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-16/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
+    # y = Signoff().signoff('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
 
-    # c = Compare_Signoff_PA('MAS Sign-off-2018-06-06-to-2018-06-30.xlsx', 'Roster-Export-2018-07-12-16-15-19.txt', 'Processed MAS-2018-06-06-to-2018-06-30.xlsx')
+    # c = Compare_Signoff_PA('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx',
+    #                        'TestData/Roster-Export-2018-04-16-13-15-24.txt', 'CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/Processed MAS-2018-01-01-to-2018-01-31.xlsx')
     # c.compare_signoff_pa()
     # c.EDI_837_excel()
-    # Process_Methods.generate_837('837P-2 Data-for-2018-06-04-to-2018-06-10.xlsx')
+    # Process_Methods.generate_837('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/837P Data-for-2018-01-01-to-2018-01-31.xlsx')
     # Process_Methods.generate_270('./TestData/Vendor-31226-2018-05-07-09-55-59.txt')
     # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
-    # Process_Methods.process_276_receipt('R180525165538.090001.x12', edi837='837P-1 Data-for-2018-04-30-to-2018-05-06 (1).xlsx')
+    # Process_Methods.process_276_receipt('276TEST/R180717173547.090001.x12', edi837='276TEST/837P-2 Data-for-2018-06-11-to-2018-06-17.xlsx')
 
     # c = Correction_compare_with_PDF('./2018-06-12/MAS Correction-2018-01-01-to-2018-01-31.xlsx', './TestData/NEW_Jan-March 2018 Payment new .xlsx')
     # c.check_PDF_payment()
