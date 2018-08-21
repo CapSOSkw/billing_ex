@@ -1211,7 +1211,6 @@ class Sqlite_Methods():
     #@To do
     def add_new_procedureCode_Rule(self):
         '''
-        Should program in dynamic
         :return:
         '''
         pass
@@ -2955,7 +2954,9 @@ class MASProtocol():
         startSessionResponse = self.requestStartSession()
         try:
             root = ET.fromstring(startSessionResponse.text.encode('utf-8'))
+            logging.info('Getting Session ID.')
             return root.findall('.//sessionIdentifier')[0].text
+
         except:
             raise ValueError('INVALID RESPONSE!')
 
@@ -2977,6 +2978,7 @@ class MASProtocol():
         return
 
     def _makeInvoiceAttest(self):
+        logging.info('Starting Invoice Attest...')
         uniqueInvoiceNumberList = self.df['INVOICE ID'].unique().tolist()
         xml = []
 
@@ -3052,12 +3054,14 @@ class MASProtocol():
         # If want to pretty print XML, using the following codes.
         # from bs4 import BeautifulSoup
         # print(BeautifulSoup(xml_str, 'xml').prettify())
-
+        logging.info('XML data is ready.')
+        logging.info('Uploading Invoice Attest request.')
         return ''.join(xml)
 
     def requestInvoiceAttest(self):
         response = requests.post(self._address, data=self._makeInvoiceAttest(), headers=self._headers)
         # print(response.text)
+        logging.info('Parsing Report...')
         try:
             root = ET.fromstring(response.text.encode('utf-8'))
             correct = root.findall('.//InvoicesCorrect')[0].text
@@ -3132,20 +3136,24 @@ if __name__ == '__main__':
     dict_base_df = base_df.to_dict('records')
     info_locker.base_info = dict_base_df[0] if dict_base_df else None
 
+
     # p = Process_MAS('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
 
     # print(info_locker.driver_information)
 
-    # y = Signoff().signoff('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
+    # y = Signoff().signoff('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
 
-    # c = Compare_Signoff_PA('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx',
-    #                        'TestData/Roster-Export-2018-04-16-13-15-24.txt', 'CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/Processed MAS-2018-01-01-to-2018-01-31.xlsx')
+    # c = Compare_Signoff_PA('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx',
+    #                        'TestData/Roster-Export-2018-04-16-13-15-24.txt', 'CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/Processed MAS-2018-01-01-to-2018-01-31.xlsx')
     # c.compare_signoff_pa()
     # c.EDI_837_excel()
     # Process_Methods.generate_837('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/837P Data-for-2018-01-01-to-2018-01-31.xlsx')
-    # Process_Methods.generate_270('./TestData/Vendor-31226-2018-05-07-09-55-59.txt')
+    # Process_Methods.generate_270('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
     # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
     # Process_Methods.process_276_receipt('276TEST/R180717173547.090001.x12', edi837='276TEST/837P-2 Data-for-2018-06-11-to-2018-06-17.xlsx')
 
     # c = Correction_compare_with_PDF('./2018-06-12/MAS Correction-2018-01-01-to-2018-01-31.xlsx', './TestData/NEW_Jan-March 2018 Payment new .xlsx')
     # c.check_PDF_payment()
+
+    # MAS_api = MASProtocol(signoff_file='CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx')
+    # MAS_api.main()
