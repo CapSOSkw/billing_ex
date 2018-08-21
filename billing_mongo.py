@@ -29,6 +29,10 @@ from functools import wraps
 from ast import literal_eval
 from collections import Counter, OrderedDict
 import arrow
+import xml.etree.ElementTree as ET
+import logging
+pd.options.mode.chained_assignment = None
+logging.getLogger().setLevel(logging.INFO)      # Set logging level to logging.INFO, otherwise would only display warning level.
 
 
 def CleanAddress(func):
@@ -69,8 +73,8 @@ def Google(func):
         :param address: string type
         :return: Return geo points (lng, lat)
         '''
-        sq = Sqlite_Methods('ProcedureCodes.db')
-        if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
+        sq = Sqlite_Methods('EX.db')
+        if_address_in_cache = sq.check_address_in_cache('addressCache', address)
         if if_address_in_cache != None:
 
             return if_address_in_cache[0], if_address_in_cache[1]
@@ -99,8 +103,7 @@ def Google(func):
     return wrapper
 
 
-class info_locker(object):
-
+class info_locker():
     driver_information = None
     base_info = None
 
@@ -136,8 +139,8 @@ class Process_Methods():
         :param address: string type
         :return: Return geo points (lng, lat)
         '''
-        sq = Sqlite_Methods('ProcedureCodes.db')
-        if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
+        sq = Sqlite_Methods('EX.db')
+        if_address_in_cache = sq.check_address_in_cache('addressCache', address)
         if if_address_in_cache != None:
 
             return if_address_in_cache[0], if_address_in_cache[1]
@@ -198,26 +201,39 @@ class Process_Methods():
 
     @staticmethod
     def getPolygonIDs(address):
-        sq = Sqlite_Methods('ProcedureCodes.db')
-        if_address_in_cache = sq.check_address_in_cache('address_cache_test', address)
+        sq = Sqlite_Methods('EX.db')
+        if_address_in_cache = sq.check_address_in_cache('addressCache', address)
 
         if if_address_in_cache != None:
+            '''If address is in the cache, then directly get the polygonIds.
+            '''
             result = if_address_in_cache[2]
             anti_process_result = [int(i) for i in result.split(',')]
             return anti_process_result
 
         else:
+            '''
+            If address is not in the cache, then use MongoDB_Methods() to get polygonIds.
+            Then store this address into cache.
+            '''
             lng, lat = Process_Methods.google_address(address)
             # print(lng, lat)
             result = MongoDB_Methods(localhost=True).getPolygonID(lng=lng, lat=lat)
             # print(result)
             process_result = ','.join(map(str, result))
-            sq.upsert_address_cache('address_cache_test', address, lng, lat, process_result)
+            sq.upsert_address_cache('addressCache', address, lng, lat, process_result)
             print(f'HOUSTON! {address} IS RECORDED!')
             return result
 
     @staticmethod
     def frange(start, end, step):
+        '''
+        Float range function.
+        :param start:
+        :param end:
+        :param step:
+        :return:
+        '''
         while start < end:
             yield float('{0:.2f}'.format(start))
             start += step
@@ -225,13 +241,12 @@ class Process_Methods():
     @staticmethod
     def generate_procedureCodes(dataframe, mileage, pickup_poly, dropoff_poly, **kwargs):
         '''
-        Base on database to generate cooresponding codes
+        Base on rules in database to generate corresponding codes
         :param dataframe: Commonly call from 'get_procedureCode_Rule_to_df()'
         :param kwargs: mileage, pickup_polygonIDs, dropoff_polygonIDs, etc.
         :return: 1. A list, the codes should be used in this trip.
-                2. A dictionary type, contains code names and modifiers
+                2. A dictionary, it contains code names and modifiers
         '''
-
 
         result = []
         res_to_dict = {}
@@ -242,10 +257,12 @@ class Process_Methods():
             pickup = row['polygonID_pickup']
             dropoff = row['polygonID_dropoff']
 
+            # Rule 1 considers mileage.
             Rule1 = mileage in Process_Methods().frange(mileage_start, mileage_end, 0.01) if mileage_end > 0 else mileage > mileage_start
             if not Rule1:
                 continue
 
+            # Rule 2 considers pickup polygon.
             if pickup == 0:
                 Rule2 = True
             elif pickup > 0:
@@ -255,6 +272,7 @@ class Process_Methods():
             if not Rule2:
                 continue
 
+            # Rule 3 considers dropoff polygon.
             if dropoff == 0:
                 Rule3 = True
             elif dropoff > 0:
@@ -263,6 +281,8 @@ class Process_Methods():
                 Rule3 = True if -dropoff not in dropoff_poly else False
             if not Rule3:
                 continue
+
+            # Other Rules #
 
             result.append(row['CodeName'])
             res_to_dict[row['CodeName']] = {
@@ -299,15 +319,40 @@ class Process_Methods():
         np.savetxt(output_name, df, delimiter=delimiter, fmt=fmt)
 
     @staticmethod
-    def generate_837(file, delay_claim):
-        edi = EDI837P(file, delay_claim)
+    def string2bin(text):
+        return " ".join(format(ord(i), 'b') for i in text)
+
+    @staticmethod
+    def string2hex(text):
+        return "".join(format(ord(i), '02X') for i in text)
+
+    @staticmethod
+    def hex2string(text):
+        return bytearray.fromhex(text).decode()
+
+    @staticmethod
+    def generate_837(file):
+        edi = EDI837P(file)
         stream_837data = edi.ISA_IEA()
         filename = edi.file_name + '.txt'
 
-        Process_Methods.write_to_txt(stream_837data, filename)
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        Process_Methods.write_to_txt(stream_837data, os.path.join(file_saving_path, filename))
 
     @staticmethod
     def generate_270(MAS_raw_file):
+        '''
+        function checked on 06/13/2018.
+        :param MAS_raw_file:
+        :return:
+        '''
         raw_df = pd.read_table(MAS_raw_file) if MAS_raw_file.endswith('txt') else pd.read_csv(MAS_raw_file)
 
         result_df = pd.DataFrame()
@@ -346,17 +391,33 @@ class Process_Methods():
         result_df['DOB'] = dob
         result_df['SVC DATE'] = service_date
 
-        result_df.to_excel('270-data-test.xlsx', index=False)
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        result_df.to_excel(os.path.join(file_saving_path, '270-data-' + str(datetime.today().date()) + str(datetime.now().time().strftime('%H%M%S')) + '.xlsx'),
+                           index=False)
 
         edi = EDI270(result_df)
         stream_270_data = edi.ISA_IEA()
         filename = edi.file_name
 
-        Process_Methods.write_to_txt(stream_270_data, filename)
+        Process_Methods.write_to_txt(stream_270_data, os.path.join(file_saving_path, filename))
 
     @staticmethod
     def process_271(receipt_file, lined_file=False):
-        SQ =Sqlite_Methods('EDI.db')  # connect to sqlite3
+        '''
+        function checked on 06/13/2018.
+        :param receipt_file:
+        :param lined_file:
+        :return:
+        '''
+
+        SQ =Sqlite_Methods('EX.db')  # connect to sqlite3
 
         if lined_file == False:  # for raw receipt data
             receipt_df = pd.read_csv(receipt_file, delimiter="~", header=None, )
@@ -461,7 +522,6 @@ class Process_Methods():
                 else:
                     eligible_code = "AAA"
 
-
             elif row[0] == 'NM1' and row[1] == 'IL':
                 patient_lastname, patient_firstname, CIN = row[3], row[4], row[9]
 
@@ -491,7 +551,10 @@ class Process_Methods():
 
                 address = address_row1[1] + " " + address_row2[1] + " " + address_row2[2] + " " + address_row2[3]
                 # contact_name = contact_row[2]
-                contact_tel = contact_row[4]
+                try:
+                    contact_tel = contact_row[4]
+                except:
+                    contact_tel = '0000000000'
 
             elif row[0] == 'NM1' and row[1] == 'P4':
                 other_payer_name.append(row[3])
@@ -646,15 +709,23 @@ class Process_Methods():
              'Other Payer2 name', 'Other Payer2 address', 'Other Payer2 tel.', 'Other Payer2 group number',
              'Other Payer policy number']]
 
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
         file_name_271 = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
-        result_df.to_excel('271-' + file_name_271 + '.xlsx', index=False)
+        result_df.to_excel(os.path.join(file_saving_path,'271-' + file_name_271 + '.xlsx'), index=False)
 
         SQ.upsert271(table='Eligibility271', data=result_df)   # Store all 271 eligibility result in Sqlite3
         PendingFromdf = result_df.loc[result_df['Eligibility Result'] == 'PENDING']
         PendingFromdf_cinList = PendingFromdf['CIN'].tolist()
         manual_df = SQ.generate_excel_from_manually271Lib(table='ManuallyCheck271', tofile=False)
         if manual_df.__len__() == 0:
-            print('Database ManuallyCheck271 is empty!')
+            print("No records in database!")
         else:
             eligibleFrom_manual_df_cinList = manual_df.loc[manual_df['Eligible'] == 'Eligible', 'CIN'].tolist()
             if eligibleFrom_manual_df_cinList.__len__() != 0:
@@ -663,7 +734,11 @@ class Process_Methods():
                         pendingCIN_idx = PendingFromdf.loc[PendingFromdf['CIN'] == pendingCIN].index.tolist()
                         PendingFromdf = PendingFromdf.drop(index=pendingCIN_idx)
 
-            PendingFromdf.to_excel('271Not eligible Trips.xlsx', index=False)
+            else:
+                pass
+
+            PendingFromdf.to_excel(os.path.join(file_saving_path, '271-Not eligible Trips' + file_name_271 + '.xlsx'),
+                                   index=False)
 
     @staticmethod
     def generate_276(receipt837_file, edi837_data, lined_file=False):
@@ -753,12 +828,22 @@ class Process_Methods():
         result_df = result_df[['INVOICE NUMBER', 'DOB', 'GENDER', 'CLIENT LAST NAME',
                                'CLIENT FIRST NAME', 'MEDICAID ID NUMBER', 'CLAIM CONTROL NUMBER', 'SVC DATE']]
 
-        result_df.to_excel('276-data.xlsx', index=False)
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        file_name_276data = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
+
+        result_df.to_excel(os.path.join(file_saving_path, '276-data-' + file_name_276data + '.xlsx'), index=False)
 
         edi = EDI276(result_df)
         stream_276_data = edi.ISA_IEA()
         filename = edi.file_name
-        Process_Methods.write_to_txt(stream_276_data, filename)
+        Process_Methods.write_to_txt(stream_276_data, os.path.join(file_saving_path, filename))
 
     @staticmethod
     def process_276_receipt(receipt_file, edi837=None, lined_file=False):
@@ -778,7 +863,7 @@ class Process_Methods():
             edi837_df = pd.read_excel(edi837)
             edi837_df['invoice number'] = edi837_df['invoice number'].astype(str)
 
-        SQ = Sqlite_Methods('ProcedureCodes.db')
+        SQ = Sqlite_Methods('EX.db')
 
         result_dict = {}
         temp_dict = {}
@@ -893,8 +978,7 @@ class Process_Methods():
                         'Patient Firstname': patient_firstname,
                         'CIN': CIN,
                         'Claim Ctrl Number': claim_ctrl_num,
-                        'P1 Total Expected Amt': claim_amount,
-                        'P2 Total Expected Amt': total_expected_amt,
+                        'Total Expected Amt': total_expected_amt,
                         'Total Paid Amt': total_paid_amt,
                         'Service Date': service_date,
                         'Comparison Codes': str(embedded_code_dict),
@@ -911,7 +995,7 @@ class Process_Methods():
                         'Patient Firstname': patient_firstname,
                         'CIN': CIN,
                         'Claim Ctrl Number': claim_ctrl_num,
-                        'P2 Total Expected Amt': total_expected_amt,
+                        'Total Expected Amt': total_expected_amt,
                         'Total Paid Amt': total_paid_amt,
                         'Service Date': service_date,
                         'Comparison Codes': str(embedded_code_dict),
@@ -938,18 +1022,124 @@ class Process_Methods():
         result_df = pd.DataFrame(result_dict)
         result_df = result_df.transpose()
         if edi837:
-            result_df = result_df[['Invoice Number', 'Result', 'P1 Total Expected Amt', 'P2 Total Expected Amt', 'Total Paid Amt', 'Comparison Codes',
+            result_df = result_df[['Invoice Number', 'Result', 'Total Expected Amt', 'Total Paid Amt', 'Comparison Codes',
                                'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date', 'NPI', 'DRIVER ID', 'VEHICLE ID']]
 
         else:
             result_df = result_df[
-                ['Invoice Number', 'Result', 'P2 Total Expected Amt', 'Total Paid Amt',
+                ['Invoice Number', 'Result', 'Total Expected Amt', 'Total Paid Amt',
                  'Comparison Codes',
                  'Patient Lastname', 'Patient Firstname', 'CIN', 'Claim Ctrl Number', 'Service Date']]
 
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
         file_name_276277 = str(datetime.today().date()) + str(datetime.now().time().strftime("%H%M%S"))
 
-        result_df.to_excel('test276277.xlsx',index=False)
+        result_df.to_excel(os.path.join(file_saving_path, '276-277-' + file_name_276277 + '.xlsx'),
+                           index=False)
+
+    @staticmethod
+    def process_835(receipt_file, lined_file=False):
+        if lined_file==False:    # for raw receipt data
+            receipt_df = pd.read_csv(receipt_file, delimiter="~", header=None,)
+            receipt_df = receipt_df.transpose()
+            receipt_df.columns = ['line']
+            receipt_df['line'] = receipt_df['line'].dropna()
+        else:          # already split into lines
+            receipt_df = pd.read_csv(receipt_file)
+            receipt_df.columns = ['line']
+
+        receipt_df = receipt_df.dropna()
+        receipt_df['line_sep'] = receipt_df['line'].apply(lambda x: x.split("*"))
+
+        clp_idx = [l for l in range(receipt_df.__len__()) if receipt_df.ix[l, 1][0] == 'CLP'] + [receipt_df.__len__()]
+
+        invoice_number = []
+        expect_amount = []
+        paid_amount = []
+        claim_number = []
+        patient_ln = []
+        patient_fn = []
+        patient_medicaid = []
+        service_date = []
+
+        all_codes = []
+
+        for i in range(0, len(clp_idx)-1):
+            code = []
+
+            for r in range(clp_idx[i], clp_idx[i+1]):
+                row = receipt_df.ix[r, 1]
+                if row[0] == "CLP":
+                    invoice_number.append(row[1])
+                    expect_amount.append(float(row[3]))
+                    paid_amount.append(float(row[4]))
+                    claim_number.append(row[7])
+
+                elif row[0] == "NM1" and row[1] == "QC":
+                    patient_ln.append(row[3])
+                    patient_fn.append(row[4])
+                    patient_medicaid.append(row[9])
+
+                elif row[0] == 'DTM' and row[1] == "232":
+                    service_date.append(arrow.get(row[2], 'YYYYMMDD').format('MM/DD/YYYY'))
+
+                elif row[0] == 'SVC':
+                    code.append(row[1][3:])
+
+            all_codes.append(code)
+
+        # print(invoice_number.__len__(), all_codes.__len__())
+        result = pd.DataFrame()
+        result['Invoice Number'] = invoice_number
+        result['Claim Number'] = claim_number
+        result['Expected Amount'] = expect_amount
+        result['Paid Amount'] = paid_amount
+        result['Patient Firstname'] = patient_fn
+        result['Patient Lastname'] = patient_ln
+        result['Patient Medicaid'] = patient_medicaid
+        result['Service Date'] = service_date
+        result['Code'] = all_codes
+
+
+        uniqueInvoice = result['Invoice Number'].unique().tolist()
+        for i in uniqueInvoice:
+            idx_result = result.loc[result['Invoice Number'] == i].index.tolist()
+
+            if all(result.ix[idx, 'Paid Amount'] == 0 for idx in idx_result) and idx_result.__len__() > 1:
+                result = result.drop(idx_result[1:])
+
+            else:
+                result = result.drop(idx for idx in idx_result if result.ix[idx, 'Paid Amount'] == 0 and idx_result.__len__() > 1)
+
+        expect_amount_value = sum(result['Expected Amount'].tolist())
+        paid_amount_value = sum(result['Paid Amount'].tolist())
+
+
+        last_line = len(result) + 1
+        result.ix[last_line, 'Claim Number'] = 'Total:'
+        result.ix[last_line, 'Expected Amount'] = expect_amount_value
+        result.ix[last_line, 'Paid Amount'] = paid_amount_value
+        result.ix[last_line, 'Patient Firstname'] = abs(result.ix[last_line, 'Expected Amount'] - result.ix[last_line, 'Paid Amount'])
+
+
+        file_name_835= str(arrow.get().date()) + str(datetime.now().time().strftime("%H%M%S"))
+
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        result.to_excel(os.path.join(file_saving_path, '835-Decoding-' + file_name_835 + '.xlsx'), index=False)
 
 
 class MongoDB_Methods():
@@ -965,10 +1155,11 @@ class MongoDB_Methods():
             self.mycollection = self.db.ali_polygon
 
         else:
+            # 69.18.218.27; 192.168.130.62
             mongo_uri = "mongodb://root:" + urllib.parse.quote('0p8rr@Fruit') + '@192.168.130.62:27017/operr_v3_dev'
             self.conn = MongoClient(mongo_uri)
             self.db = self.conn.operr_v3_dev
-            self.mycollection = self.db.polygon_boundary_keyuan_copy
+            self.mycollection = self.db.polygon_boundary_keyuan
 
     def getPolygonID(self, lng, lat):
         '''
@@ -1020,15 +1211,14 @@ class Sqlite_Methods():
     #@To do
     def add_new_procedureCode_Rule(self):
         '''
-        Should program in dynamic
         :return:
         '''
         pass
 
     def get_procedureCode_Rule_to_df(self, table, *args):
         '''
-        Get cooresponding codes data from database.
-        Can use certain codes or all codes by default
+        Get corresponding codes data from database.
+        Can select certain codes or all codes by default
         :return: Dataframe
         '''
         if not args:
@@ -1183,11 +1373,11 @@ class Sqlite_Methods():
 
 class Process_MAS():
     def __init__(self, rawfile):
-        assert (rawfile.endswith('.txt')), "HOUSTON, WE'VE GOT A PROBLEM HERE! \nONLY PROCESS TXT-FORMAT FILE!"
+        # assert (rawfile.endswith('.txt')), "HOUSTON, WE'VE GOT A PROBLEM HERE! \n   ONLY TXT-FORMAT FILE!"
         self.P = Process_Methods()
-        self.SQ = Sqlite_Methods('ProcedureCodes.db')
+        self.SQ = Sqlite_Methods('EX.db')
 
-        self.raw_df = pd.read_table(rawfile)
+        self.raw_df = pd.read_table(rawfile) if rawfile.endswith('.txt') else pd.read_excel(rawfile)
         self.raw_df['Pick-up Zip'] = self.raw_df['Pick-up Zip'].fillna(0)
         self.raw_df['Drop-off Zip'] = self.raw_df['Drop-off Zip'].fillna(0)
         # pre-process address first
@@ -1232,18 +1422,23 @@ class Process_MAS():
 
         temp_df = pd.DataFrame()  # for cache usage
 
+        # Change logic to Leg_ID
         raw_df = self.Add_abcd_legs()
+        # raw_df = self.raw_df
+
         raw_df['processed_pickup_address'] = raw_df['Pick-up Address'] + ", " + raw_df['Pick-up City'] + ", " + \
                                              raw_df['Pick-up State'] + " " + raw_df['Pick-up Zip']
 
         raw_df['processed_dropoff_address'] = raw_df['Drop-off Address'] + ", " + raw_df['Drop-off City'] + ", " + \
                                              raw_df['Drop-off State'] + " " + raw_df['Drop-off Zip']
 
-
         ####### TO DO #########
         ####### RULE DATAFRAME #########
         ####### SHOULD IMPROVE FOR DIFFERENT BASES AND RULES ##########
         ####### Applied to following function ##########
+        '''
+        This function should be improved with args.
+        '''
         Rule_df = self.SQ.get_procedureCode_Rule_to_df('Rule')
         ########################
 
@@ -1272,11 +1467,12 @@ class Process_MAS():
             count += 1
             if count % display_flag == 0:
                 progress = int(round(count / count_legs, 1) * 100)
-                print(f'PROCEDURE CODES ARE ADDING TO TRIPS......{progress}% COMPLETED.')
+                # print(f'PROCEDURE CODES ARE ADDING TO TRIPS......{progress}% COMPLETED.')
+                logging.info(f'\nPROCEDURE CODES ARE ADDING TO TRIPS-->{progress}% COMPLETED.')
 
         temp_df['service_date'] = raw_df['Service Starts'].apply(lambda x: datetime.strptime(x, '%m/%d/%Y').date())
 
-        min_service_date, max_service_date  = min(temp_df['service_date']), max(temp_df['service_date'])
+        min_service_date, max_service_date = min(temp_df['service_date']), max(temp_df['service_date'])
 
         raw_df = raw_df[['Export ID', 'Record_Number', 'Invoice Number', 'Record Type',
                            'First Name', 'Middle Initial', 'Last Name', 'CIN', 'Gender',
@@ -1295,8 +1491,8 @@ class Process_MAS():
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
-        # basename = info_locker.base_info['BaseName']
-        file_saving_path = os.path.join(current_path, daily_folder)
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
         if not os.path.exists(file_saving_path):
             os.makedirs(file_saving_path)
             print('Save files to {0}'.format(file_saving_path))
@@ -1309,7 +1505,7 @@ class Process_MAS():
 
 class Signoff():
     def __init__(self):
-        self.sq = Sqlite_Methods('ProcedureCodes.db')
+        self.sq = Sqlite_Methods('EX.db')
 
     def signoff(self, processedMAS, TotalJob):
         print('LOADING FILES...PROGRESS 20%')
@@ -1326,8 +1522,6 @@ class Signoff():
             mas_df = processedMAS
         else:
             mas_df = pd.read_excel(processedMAS)
-
-
 
         # Drop service type
         service_idx = mas_df.loc[mas_df['Record Type'] == 'Service'].index
@@ -1363,20 +1557,6 @@ class Signoff():
 
                     else:
                         print(f'HOUSTON! WE ARE FACING A TOTALLY NEW CODE {code} HERE!')
-                    # print(response[0], response[1])
-
-                    # if code == 'A0100':
-                    #     MAS_amount += D('25.95')
-                    # elif code == 'A0100TN':
-                    #     MAS_amount += D('35')
-                    # elif code == 'S0215':
-                    #     MAS_amount += D('3.21') * (leg_mileage - D(8.0))
-                    # elif code == 'S0215TN':
-                    #     MAS_amount += D('2.25') * leg_mileage
-                    # elif code == 'A0100SC':
-                    #     MAS_amount += D('25')
-                    # else:
-                    #     MAS_amount += D('0')
 
                 MAS_amount = math.floor(float(MAS_amount) * 100) / 100.
                 totalJob_df.ix[idx_in_totaljob[0], 'MAS amount'] = MAS_amount
@@ -1386,8 +1566,8 @@ class Signoff():
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
-        # basename = info_locker.base_info['BaseName']
-        file_saving_path = os.path.join(current_path, daily_folder)
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
         if not os.path.exists(file_saving_path):
             os.makedirs(file_saving_path)
             print('Save files to {0}'.format(file_saving_path))
@@ -1395,7 +1575,6 @@ class Signoff():
         totalJob_df.to_excel(os.path.join(file_saving_path,
                                            f'Difference_Totaljobs&Claims_{datetime.today().date()}_{datetime.now().time().strftime("%H%M%S")}.xlsx'),
                               index=False)
-
 
         # Processing Functions #
 
@@ -1457,7 +1636,10 @@ class Signoff():
         signoff_df['LEG ID'] = mas_df['Leg ID'].astype(int)
         signoff_df['TOLL FEE'] = signoff_df['INVOICE ID'].apply(lambda x: get_tollfee_from_totaljob(x))
         signoff_df['PROCEDURE CODE'] = mas_df['Calculated Codes']
+
+        mas_df['Leg Mileage'] = mas_df['Leg Mileage'].apply(lambda x: math.ceil(float(x)))
         signoff_df['TRIP MILEAGE'] = mas_df['Leg Mileage']
+
         signoff_df['PICK UP ADDRESS'] = mas_df['Pick-up Address']
         signoff_df['PICK UP CITY'] = mas_df['Pick-up City']
         signoff_df['PICK UP ZIPCODE'] = mas_df['Pick-up Zip'].astype(int)
@@ -1558,7 +1740,7 @@ class Signoff():
 
         # Merge
         print("GENERATING SIGN-OFF...PROGRESS 90%")
-        signoff_df = pd.concat([signoff_df, missed_trip_concat_to_signoff_df], 0)
+        signoff_df = pd.concat([signoff_df, missed_trip_concat_to_signoff_df], 0, sort=False)
         signoff_df = signoff_df[['SERVICE DAY', 'INVOICE ID', 'LEG ID', 'TOLL FEE', 'PROCEDURE CODE',
                                    'TRIP MILEAGE', 'PICK UP ADDRESS', 'PICK UP CITY', 'PICK UP ZIPCODE',
                                    'DROP OFF ADDRESS', 'DROP OFF CITY', 'DROP OFF ZIPCODE', 'PICK UP TIME',
@@ -1567,8 +1749,8 @@ class Signoff():
         # Output file
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
-        # basename = info_locker.base_info['BaseName']
-        file_saving_path = os.path.join(current_path, daily_folder)
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
         if not os.path.exists(file_saving_path):
             os.makedirs(file_saving_path)
             print('Save files to {0}'.format(file_saving_path))
@@ -1577,6 +1759,7 @@ class Signoff():
                                          'MAS Sign-off-{0}-to-{1}.xlsx'.format(self.min_service_date, self.max_service_date)),
                             index=False)
         print("SIGN-OFF FILE GENERATED!")
+        return signoff_df
 
 
 class Compare_Signoff_PA():
@@ -1590,7 +1773,7 @@ class Compare_Signoff_PA():
         self.PA_df['Invoice Number'] = self.PA_df['Invoice Number'].astype(str)
 
         self.signoff_df = self.signoff_df.loc[self.signoff_df['LEG STATUS'] == 0]
-        self.sq = Sqlite_Methods('ProcedureCodes.db')
+        self.sq = Sqlite_Methods('EX.db')
 
     def compare_signoff_pa(self):
         unique_invoice_number_in_signoff = self.signoff_df['INVOICE ID'].unique().tolist()
@@ -1682,7 +1865,7 @@ class Compare_Signoff_PA():
                 signoff_code_list.append(str(dict(counter_signoff_codes)))
                 signoff_tollfee_list.append(sum(signoff_tollfee))
 
-
+        logging.info('GENERATING MAS CORRECTION FILE...')
         missed_trips_df['MISSED TRIPS'] = missed_trips
         correction_df = pd.DataFrame()
         correction_df['Service Date'] = service_data_list
@@ -1710,8 +1893,8 @@ class Compare_Signoff_PA():
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
-        # basename = info_locker.base_info['BaseName']
-        file_saving_path = os.path.join(current_path, daily_folder)
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
         if not os.path.exists(file_saving_path):
             os.makedirs(file_saving_path)
             print('Save files to {0}'.format(file_saving_path))
@@ -1721,10 +1904,13 @@ class Compare_Signoff_PA():
                                index=False)
 
         if missed_trips_df.__len__() != 0:
+            logging.info(f'{len(missed_trips)} MISSING TRIPS FOUND. \n'
+                         f'GENERATING TO REPORT...')
+
             current_path = os.getcwd()
             daily_folder = str(datetime.today().date())
-            # basename = info_locker.base_info['BaseName']
-            file_saving_path = os.path.join(current_path, daily_folder)
+            basename = info_locker.base_info['BaseName']
+            file_saving_path = os.path.join(current_path, basename, daily_folder)
             if not os.path.exists(file_saving_path):
                 os.makedirs(file_saving_path)
                 print('Save files to {0}'.format(file_saving_path))
@@ -1740,8 +1926,15 @@ class Compare_Signoff_PA():
         self.correction_df = self.compare_signoff_pa()
         correction_invoice_number = self.correction_df['Invoice Number'].tolist()
 
+        # Count
+        length_invoice_number = len(correction_invoice_number)
+        displayFlag = int(round(length_invoice_number / 10))
+        flagCount = 0
+
         edi_837_dict = {}
+        logging.info('SETTING UP 837 TEMPLATE...')
         for invoice_number in correction_invoice_number:
+
             temp_dict = OrderedDict([
                 ('patient last name', ""),
                 ('patient first name', ""),
@@ -1859,19 +2052,170 @@ class Compare_Signoff_PA():
 
             edi_837_dict[str(invoice_number)] = temp_dict
 
+            flagCount += 1
+
+            if flagCount % displayFlag == 0:
+                progress = int(round(flagCount / length_invoice_number, 1) * 100)
+                logging.info(f'FILLING UP 837 DATA-->{progress}% COMPLETED.')
+
+
         edi_837_df = pd.DataFrame.from_dict(edi_837_dict, 'index')
-        edi_837_df.to_excel('837 test.xlsx', index=False)
+
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        logging.info('GENERATING 837 DATA FILE...')
+        edi_837_df.to_excel(os.path.join(file_saving_path, '837P Data-for-{0}-to-{1}.xlsx'.format(self.min_service_date, self.max_service_date)), index=False)
+
+
+class Correction_compare_with_PDF():
+    def __init__(self, correction_file, PDF):
+        self.signoff_compare_PA_file = correction_file
+        self.payment_raw_file = PDF
+
+    def check_PDF_payment(self):
+        new_compare_filename = re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', self.signoff_compare_PA_file)[0]
+        new_compare_filename = "Check Payment-" + new_compare_filename + '.xlsx'
+
+        def split_CIN_receipt(x):
+            # print(x)
+            splited = str(x).split(" ")
+            CIN, receipt_num = splited[0], splited[1]
+            receipt_num = receipt_num.replace("-", "")
+            return CIN, int(receipt_num)
+
+        def reverse_minus(x):
+
+            x = str(x)
+            if x[-1] == '-':
+                x = '-' + x.replace("-", '')
+                return float(x)
+            else:
+                return float(x)
+
+        def remove_leg_from_invoice_number(x):
+            if type(x) == str:
+                x = x[:-1]
+                return int(x)
+            else:
+                return x
+
+        payment_df = pd.read_excel(self.payment_raw_file, names=['useless', 'invoice number', 'patient name', 'CIN and receipt number', 'service date',
+                              'code', 'code unit', 'claim amount', 'paid amount', 'note'], header=None)
+
+        # payment_df.columns = ['useless', 'invoice number', 'patient name', 'CIN and receipt number', 'service date',
+        #                       'code', 'code unit', 'claim amount', 'paid amount', 'note']
+
+        payment_df['CIN'], payment_df['receipt number'] = zip(*payment_df['CIN and receipt number'].map(split_CIN_receipt))
+        payment_df = payment_df.drop(['CIN and receipt number'], axis=1)
+
+        payment_df['code unit'] = payment_df['code unit'].apply(lambda x: reverse_minus(x))
+        payment_df['claim amount'] = payment_df['claim amount'].apply(lambda x: reverse_minus(x))
+        payment_df['paid amount'] = payment_df['paid amount'].apply(lambda x: reverse_minus(x))
+        payment_df['service date'] = payment_df['service date'].apply(lambda x: datetime.strptime(str(x), "%Y-%m-%d %H:%M:%S").strftime('%m/%d/%Y'))
+        payment_df['invoice number'] = payment_df['invoice number'].apply(lambda x: remove_leg_from_invoice_number(x))
+        ##########################################################################################################
+
+        signoff_compare_PA_df = pd.read_excel(self.signoff_compare_PA_file)
+
+        signoff_compare_PA_df['Encode Payment'] = ""
+        signoff_compare_PA_df['Payment Paid Amt'] = ""
+        signoff_compare_PA_df['Payer Claim Number'] = ""
+        signoff_compare_PA_df['Signoff-Payment comparison'] = ""
+        signoff_compare_PA_df['Payment Result'] = ""
+
+        unique_invoice_number_payment = payment_df['invoice number'].unique().tolist()
+
+        for invoice_number in unique_invoice_number_payment:
+
+            idx_payment = payment_df.loc[payment_df['invoice number'] == invoice_number].index.tolist()
+            idx_signoff_compare_PA = signoff_compare_PA_df.loc[signoff_compare_PA_df['Invoice Number'] == invoice_number].index.tolist()
+
+            if idx_signoff_compare_PA.__len__() == 0:
+                continue
+            else:
+                signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payer Claim Number'] = payment_df.ix[idx_payment[0], 'receipt number']
+
+                temp_payment_code_dict = {}
+                temp_paid_amount = []
+
+                for i in idx_payment:
+
+                    temp_paid_amount.append(payment_df.ix[i, 'paid amount'])
+                    code = payment_df.ix[i, 'code']
+                    unit = payment_df.ix[i, 'code unit']
+                    temp_payment_code_dict[code] = unit
+
+                signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Encode Payment'] = str(temp_payment_code_dict)
+                signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payment Paid Amt'] = round(
+                    sum(temp_paid_amount), 2)
+
+                encoded_signoff = signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Encode Signoff']
+                if set(temp_payment_code_dict.items()) - set(literal_eval(encoded_signoff).items()) != set({}):
+                    signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Signoff-Payment comparison'] = 'DIFFERENT'
+                else:
+                    pass
+
+                if signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Signoff Total Amount'] <= signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payment Paid Amt']:
+                    signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payment Result'] = 'OKAY'
+                else:
+                    signoff_compare_PA_df.ix[idx_signoff_compare_PA[0], 'Payment Result'] = 'DIFFERENT'
+
+        none_encode_payment_idx = signoff_compare_PA_df.loc[signoff_compare_PA_df['Encode Payment'] == ""].index.tolist()
+
+        for i in none_encode_payment_idx:
+            notFoundServiceDate = signoff_compare_PA_df.ix[i, 'Service Date']
+            notFoundCIN = signoff_compare_PA_df.ix[i, 'CIN']
+            maybeReplacedInvoice = payment_df.loc[((payment_df['CIN'] == notFoundCIN) & (payment_df['service date'] == notFoundServiceDate)), 'invoice number'].tolist()
+
+            if maybeReplacedInvoice.__len__() == 0:
+                signoff_compare_PA_df.ix[i, 'Payment Result'] = 'Not Found'
+
+            else:
+                # print(maybeReplacedInvoice[0])
+                idx_maybeReplacedInvoice = payment_df.loc[payment_df['invoice number'] == maybeReplacedInvoice[0]].index.tolist()
+                replacedReceiptNumber = payment_df.ix[idx_maybeReplacedInvoice[0], 'receipt number']
+                replacedPaidamount = [payment_df.ix[r, 'paid amount'] for r in idx_maybeReplacedInvoice]
+                replacedTotalPaidAmount = round(sum(replacedPaidamount), 2)
+
+                signoff_compare_PA_df.ix[i, 'Payment Result'] = 'Replaced ' + str(maybeReplacedInvoice[0])
+                signoff_compare_PA_df.ix[i, 'Payer Claim Number'] = replacedReceiptNumber
+                signoff_compare_PA_df.ix[i, 'Payment Paid Amt'] = replacedTotalPaidAmount
+
+        orderedColumns = ['Service Date', 'Invoice Number', 'PA Number', 'Encode PA', 'Encode Signoff',
+                          'Comparison', 'Encode Payment', 'Signoff-Payment comparison', 'Signoff Amount Without Toll',
+                          'Signoff Tollfee', 'Signoff Total Amount', 'Payment Paid Amt', 'Payment Result',
+                          'Payer Claim Number', 'CIN', 'Driver ID', 'Vehicle ID', 'Service NPI']
+
+        signoff_compare_PA_df = signoff_compare_PA_df[orderedColumns]
+
+        current_path = os.getcwd()
+        daily_folder = str(datetime.today().date())
+        basename = info_locker.base_info['BaseName']
+        file_saving_path = os.path.join(current_path, basename, daily_folder)
+        if not os.path.exists(file_saving_path):
+            os.makedirs(file_saving_path)
+            print('Save files to {0}'.format(file_saving_path))
+
+        signoff_compare_PA_df.to_excel(os.path.join(file_saving_path, new_compare_filename), index=False)
 
 
 class EDI837P():
 
-    def __init__(self, file, delayed_claim=False):
-        self.delayed_claim = delayed_claim
+    def __init__(self, file, replace=False):
+        self.replace = replace
         self.df = pd.read_csv(file, dtype=object) if file[-1] == 'v' else pd.read_excel(file, dtype=object)
         # self.df = self.df.fillna("")
 
-        self.df['service date'] = self.df['service date'].apply(lambda x: arrow.get(str(x), ['MM/DD/YYYY', 'YYYY-MM-DD HH:mm:ss']).format('YYYYMMDD'))
-        self.df['patient dob'] = self.df['patient dob'].apply(lambda x: arrow.get(str(x), ['MM/DD/YYYY', 'YYYY-MM-DD HH:mm:ss']).format('YYYYMMDD'))
+        # self.df['service date'] = self.df['service date'].apply(lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
+        # self.df['patient dob'] = self.df['patient dob'].apply(lambda x: datetime.strptime(str(x), "%m/%d/%Y").strftime("%Y%m%d"))
+        self.df['service date'] = self.df['service date'].apply(lambda x: arrow.get(str(x), ['YYYY-MM-DD HH:mm:ss', 'MM/DD/YYYY']).format('YYYYMMDD'))
+        self.df['patient dob'] = self.df['patient dob'].apply(lambda x: arrow.get(str(x), ['YYYY-MM-DD HH:mm:ss', 'MM/DD/YYYY']).format('YYYYMMDD'))
         self.df['patient pregnant'] = self.df['patient pregnant'].apply(lambda x: x == "Y")
 
         self.transaction_num = self.df.__len__()
@@ -1891,7 +2235,15 @@ class EDI837P():
         # self.file_name = self.interchange_ctrl_number + '.txt'
         self.all_invoice_number = []
         self.invoice_ST_SE_dict = {}
-        self.file_name = '837-' + re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file)[0]  if re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file).__len__() != 0 else '837-' + str(datetime.today().date())
+        if self.replace:
+            self.file_name = '837-Replace-' + re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file)[0] if re.findall(
+                r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file).__len__() != 0 else '837-' + str(
+                datetime.today().date())
+        else:
+            self.file_name = '837-' + re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file)[0]  if re.findall(r'\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}', file).__len__() != 0 else '837-' + str(datetime.today().date())
+
+        self.today_datetime = arrow.now().datetime
+        self.delayDate_line = arrow.now().shift(days=-90).datetime
 
     def ISA(self, prod=True):
         if prod==False:
@@ -1987,20 +2339,31 @@ class EDI837P():
 
         return '*'.join(NM1) + "~" + '*'.join(N3) + "~" + '*'.join(N4) + "~" + '*'.join(REF1) + "~" + '*'.join(REF2) + "~"
 
-    def loop2300(self, invoice_number, amount, pa_num): #claim info
+    def loop2300(self, invoice_number, amount, pa_num, delay_claim=False, payer_control_num=None): #claim info
         if amount == "":
-            amount = "0"
+            amount = 0
         if pa_num == "":
             pa_num = 0
 
-        if self.delayed_claim == True:
-            CLM = ["CLM", str(invoice_number), str(amount), "", "", "99:B:1", "Y", "A", "Y", "Y", "P", "","","","","","","","","","11"]
+        if self.replace == False:
+            replace_code = '99:B:1'
         else:
-            CLM = ["CLM", str(invoice_number), str(amount), "", "", "99:B:1", "Y", "A", "Y", "Y", "P"]
+            replace_code = '99:B:7'
+
+        if delay_claim == True:
+            CLM = ["CLM", str(invoice_number), format(amount, '.2f'), "", "", replace_code, "Y", "A", "Y", "Y", "P", "","","","","","","","","","11"]
+        else:
+            CLM = ["CLM", str(invoice_number), format(amount, '.2f'), "", "", replace_code, "Y", "A", "Y", "Y", "P"]
+
+
         REF = ['REF', "G1", str('{:>011d}'.format(int(pa_num)))]
         HI = ["HI", "ABK:R69"]
 
-        return '*'.join(CLM) + "~" + '*'.join(REF) + "~" + '*'.join(HI) + "~"
+        if self.replace == False:
+            return '*'.join(CLM) + "~" + '*'.join(REF) + "~" + '*'.join(HI) + "~"
+        else:
+            REF_replace = ['REF', 'F8', str(payer_control_num)]
+            return '*'.join(CLM) + "~" + '*'.join(REF_replace) + '~' + '*'.join(REF) + "~" + '*'.join(HI) + "~"
 
     def loop2310a(self, driver_first, driver_last, driver_lic, service_name, service_NPI): #referring provider
         if driver_first == "":
@@ -2230,6 +2593,12 @@ class EDI837P():
             self.lx_lines = 0
             df_row = self.df.ix[[row]]   # get row data
 
+            service_date = df_row['service date'].values[0]
+            arrow_serviceDate = arrow.get(service_date, 'YYYYMMDD').datetime
+
+            delayClaim_switch = True if arrow_serviceDate <= self.delayDate_line else False
+            payerControlNum = df_row['payer control number'].values[0] if self.replace == True else None
+
             ST = self.transaction_header(iterations=row+1, invoice_number= df_row['invoice number'].values[0])
             loop1000a = self.loop1000a()
             loop1000b = self.loop1000b()
@@ -2240,7 +2609,7 @@ class EDI837P():
                                          address=df_row['patient address'].values[0], city=df_row['patient city'].values[0], state=df_row['patient state'].values[0],
                                          zipcode=df_row['patient zip code'].values[0], dob=df_row['patient dob'].values[0], gender=df_row['patient gender'].values[0])
             loop2010bb = self.loop2010bb()
-            loop2300 = self.loop2300(invoice_number=df_row['invoice number'].values[0], amount=df_row['claim_amount'].values[0], pa_num=df_row['pa number'].values[0])
+            loop2300 = self.loop2300(invoice_number=df_row['invoice number'].values[0], amount=df_row['claim_amount'].values[0], pa_num=df_row['pa number'].values[0], delay_claim=delayClaim_switch, payer_control_num=payerControlNum)
             loop2310a = self.loop2310a(driver_first=df_row['driver first name'].values[0], driver_last=df_row['driver last name'].values[0],
                                        driver_lic=df_row['driver license number'].values[0], service_name=df_row['service facility name'].values[0],
                                        service_NPI=df_row['service npi'].values[0])
@@ -2544,10 +2913,203 @@ class EDI276():
         return ISA + GS + ST_SE + GE + IEA
 
 
+class MASProtocol():
+    '''
+    Work Flow:
+    StartSession --> GetSessionID --> InvoiceAttest --> (OtherProcess) --> EndSession
+    Doc website: https://www.medanswering.com/wp-content/uploads/2017/12/MAS-API-Information.pdf
+
+    '''
+    def __init__(self, signoff_file):
+        self._api_key = 'PLMZTWNS11GU8P5276J12GHNW1KHDMW42OZ6W6VT4XTXQ76OT1OBBFE5ZF006JUZ'
+        self._address = 'https://www.medanswering.com/Provider_API.taf'
+        self._headers = {'Content-Type': 'application/xml'}
+        self.sessId = self.parseStartSession()
+
+        if isinstance(signoff_file, pd.DataFrame):
+            self.df = signoff_file
+        else:
+            self.df = pd.read_excel(signoff_file) if signoff_file.endswith('.xlsx') else pd.read_csv(signoff_file)
+
+        self.df = self.df.loc[self.df['LEG STATUS'] == 0]
+
+    def _makeStartSession(self):
+        xml = []
+
+        xml.append('<?xml version="1.0" encoding="utf-8" ?>')
+        xml.append('<TPRequest>')
+        xml.append(f'<authentication>{self._api_key}</authentication>')
+        xml.append('<startSession>')
+        xml.append('<attributes></attributes>')
+        xml.append('</startSession>')
+        xml.append('</TPRequest>')
+
+        return ''.join(xml)
+
+    def requestStartSession(self):
+        response = requests.post(self._address, data=self._makeStartSession(), headers=self._headers)
+        return response
+
+    def parseStartSession(self):
+        startSessionResponse = self.requestStartSession()
+        try:
+            root = ET.fromstring(startSessionResponse.text.encode('utf-8'))
+            logging.info('Getting Session ID.')
+            return root.findall('.//sessionIdentifier')[0].text
+
+        except:
+            raise ValueError('INVALID RESPONSE!')
+
+    def _makeEndSession(self):
+        xml = []
+
+        xml.append('<?xml version="1.0" encoding="utf-8" ?>')
+        xml.append('<TPRequest>')
+        xml.append(f'<authentication>{self._api_key}</authentication>')
+        xml.append('<endSession>')
+        xml.append(f'<sessionIdentifier>{self.sessId}</sessionIdentifier>')
+        xml.append('</endSession>')
+        xml.append('</TPRequest>')
+
+        return ''.join(xml)
+
+    def requestEndSession(self):
+        response = requests.post(self._address, data=self._makeEndSession(), headers=self._headers)
+        return
+
+    def _makeInvoiceAttest(self):
+        logging.info('Starting Invoice Attest...')
+        uniqueInvoiceNumberList = self.df['INVOICE ID'].unique().tolist()
+        xml = []
+
+        # Fixed part1
+        xml.append('<?xml version="1.0" encoding="utf-8" ?>')
+        xml.append('<TPRequest>')
+        xml.append(f'<authentication>{self._api_key}</authentication>')
+        xml.append('<InvoiceAttest version="2">')
+        xml.append(f'<sessionIdentifier>{self.sessId}</sessionIdentifier>')
+        xml.append('<Invoices>')
+
+        for i in uniqueInvoiceNumberList:
+            idx_i = self.df.loc[self.df['INVOICE ID'] == i].index.tolist()
+
+            xml.append('<Invoice>')
+            xml.append('<Status>0</Status>')
+            xml.append(f'<invoicenumber>{i}</invoicenumber>')
+            xml.append('<legs>')
+
+            for idx in idx_i:
+                legId = self.df.ix[idx, 'LEG ID']
+                mileage = self.df.ix[idx, 'TRIP MILEAGE']
+                driverId = self.df.ix[idx, 'DRIVER ID']
+                vehicleId = self.df.ix[idx, 'VEHICLE ID']
+
+
+                '''
+                # Use address cache to get geolocation, prevent from calling too many times APIs.
+                # Should add corresponding XML information in the following lines.
+                
+                pickupAddress = self.df.ix[idx, 'PICK UP ADDRESS'] + ', ' + self.df.ix[idx, 'PICK UP CITY'] + ', ' +\
+                                self.df.ix[idx, 'PICK UP ZIPCODE']
+                dropoffAddress = self.df.ix[idx, 'DROP OFF ADDRESS'] + ', ' + self.df.ix[idx, 'DROP OFF CITY'] + ', ' + \
+                                self.df.ix[idx, 'DROP OFF ZIPCODE']
+
+                pickupAddress = Process_Methods.clean_address(pickupAddress)
+                dropoffAddress = Process_Methods.clean_address(dropoffAddress)
+                pickup_lng, pickup_lat = Process_Methods.google_address(pickupAddress)
+                dropoff_lng, dropoff_lat = Process_Methods.google_address(dropoffAddress)
+                
+                '''
+
+                xml.append('<leg>')
+                xml.append(f'<legnumber>{legId}</legnumber>')
+                xml.append('<legstatus>0</legstatus>')
+                xml.append(f'<usemileage>{mileage}</usemileage>')
+                xml.append(f'<driverid>{driverId}</driverid>')
+                xml.append(f'<vehicleid>{vehicleId}</vehicleid>')
+
+                '''
+                # Add geolocation info here.    <-------
+                
+                xml.append('<pickupGPSData>')
+                xml.append(f'<latitude>{pickup_lat}</latitude><longitude>{pickup_lng}</longitude>')
+                xml.append('</pickupGPSData>)
+                xml.append('<dropoffGPSData>')
+                xml.append(f'<latitude>{dropoff_lat}</latitude><longitude>{dropoff_lng}</longitude>')
+                xml.append('</dropoffGPSData>)
+                
+                '''
+
+                xml.append('</leg>')
+
+            xml.append('</legs>')
+            xml.append('<services/>')
+            xml.append('</Invoice>')
+
+        # Fixed part2
+        xml.append('</Invoices>')
+        xml.append('</InvoiceAttest>')
+        xml.append('</TPRequest>')
+
+        # If want to pretty print XML, using the following codes.
+        # from bs4 import BeautifulSoup
+        # print(BeautifulSoup(xml_str, 'xml').prettify())
+        logging.info('XML data is ready.')
+        logging.info('Uploading Invoice Attest request.')
+        return ''.join(xml)
+
+    def requestInvoiceAttest(self):
+        response = requests.post(self._address, data=self._makeInvoiceAttest(), headers=self._headers)
+        # print(response.text)
+        logging.info('Parsing Report...')
+        try:
+            root = ET.fromstring(response.text.encode('utf-8'))
+            correct = root.findall('.//InvoicesCorrect')[0].text
+            error = root.findall('.//InvoiceErrors')[0].text
+
+            # print(f'Success: {correct};\nFailure (Or already attested): {error}')
+            logging.info(f'\nSuccess: {correct};\nFailure (Or already attested): {error}')
+
+        except ValueError:
+            raise
+
+        return correct, error
+
+    def main(self):
+        correct, error = self.requestInvoiceAttest()
+        self.requestEndSession()
+
+        return correct, error
+
+
 if __name__ == '__main__':
+    alpaca = '''
+             ┌─┐       ┌─┐
+          ┌──┘ ┴───────┘ ┴──┐
+          │                 │
+          │       ───       │
+          │  ─┬┘       └┬─  │
+          │                 │
+          │       ─┴─       │
+          │                 │
+          └───┐         ┌───┘
+              │         │
+              │         │
+              │         │
+              │         └──────────────┐
+              │                        │
+              │                        ├─┐
+              │                        ┌─┘
+              │                        │
+              └─┐  ┐  ┌───────┬──┐  ┌──┘
+                │ ─┤ ─┤       │ ─┤ ─┤
+                └──┴──┘       └──┴──┘
+
+            '''
+    print(alpaca)
 
     # sq = Sqlite_Methods('ProcedureCodes.db')
-    # # #
+    #
     # mileage = 20.9
     # pick_address = '25 PINE ST, New York, NY 10005'
     # drop_address = '430 LAKEVILLE RD, New York, NY 11042'
@@ -2563,9 +3125,8 @@ if __name__ == '__main__':
     # print(sorted(set(codes), key=codes.index))
     # print(",".join(list(set(codes))))
 ####################
-    p = Process_MAS('/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Vendor-31226-2018-05-07-09-55-59.txt')
 
-    conn = sqlite3.connect('EDI.db')
+    conn = sqlite3.connect('EX.db')
     driver_df = pd.read_sql('SELECT * FROM driver_info WHERE Base="CLEAN AIR CAR SERVICE AND PARKING COR"', conn)
     driver_df.set_index(['Fleet'], inplace=True)
     dict_driver_df = driver_df.to_dict('index')
@@ -2575,14 +3136,24 @@ if __name__ == '__main__':
     dict_base_df = base_df.to_dict('records')
     info_locker.base_info = dict_base_df[0] if dict_base_df else None
 
+
+    # p = Process_MAS('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
+
     # print(info_locker.driver_information)
 
-    # y = Signoff().signoff('./2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/TOTAL JOBS 0326-0429.xlsx')
+    # y = Signoff().signoff('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
 
-    # c = Compare_Signoff_PA('./2018-05-20/MAS Sign-off-2018-03-26-to-2018-04-29.xlsx', '/Users/keyuanwu/Desktop/MACBACKUP/Merged_autobilling/0507/Roster-Export-2018-05-07-09-53-47.txt', './2018-05-20/Processed MAS-2018-03-26-to-2018-04-29.xlsx')
+    # c = Compare_Signoff_PA('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx',
+    #                        'TestData/Roster-Export-2018-04-16-13-15-24.txt', 'CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/Processed MAS-2018-01-01-to-2018-01-31.xlsx')
     # c.compare_signoff_pa()
     # c.EDI_837_excel()
-    # Process_Methods.generate_837('837 test.xlsx', delay_claim=False)
-    # Process_Methods.generate_270('MASRawVendor-31226-2018-03-28-11-06-36.txt')
+    # Process_Methods.generate_837('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/837P Data-for-2018-01-01-to-2018-01-31.xlsx')
+    # Process_Methods.generate_270('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
     # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
-    # Process_Methods.process_276_receipt('R180525165538.090001.x12', edi837='837P-1 Data-for-2018-04-30-to-2018-05-06 (1).xlsx')
+    # Process_Methods.process_276_receipt('276TEST/R180717173547.090001.x12', edi837='276TEST/837P-2 Data-for-2018-06-11-to-2018-06-17.xlsx')
+
+    # c = Correction_compare_with_PDF('./2018-06-12/MAS Correction-2018-01-01-to-2018-01-31.xlsx', './TestData/NEW_Jan-March 2018 Payment new .xlsx')
+    # c.check_PDF_payment()
+
+    # MAS_api = MASProtocol(signoff_file='CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx')
+    # MAS_api.main()
