@@ -1093,8 +1093,21 @@ class Process_Methods():
         patient_fn = []
         patient_medicaid = []
         service_date = []
+        payment_date = ""
 
         all_codes = []
+        row_ST = receipt_df.ix[2, 1]
+        row_RPB = receipt_df.ix[3, 1]
+
+        try:
+            ID_835 = row_ST[2][:4]
+        except:
+            ID_835 = 'NA'
+
+        try:
+            payment_date = row_RPB[-1]
+        except:
+            payment_date = 'NA'
 
         for i in range(0, len(clp_idx)-1):
             code = []
@@ -1132,7 +1145,8 @@ class Process_Methods():
         result['Service Date'] = service_date
         result['Code'] = all_codes
 
-
+        # Added on 07/29/2018
+        # Drop 'Paid Amount' = 0, but keep it if there is only one line
         uniqueInvoice = result['Invoice Number'].unique().tolist()
         for i in uniqueInvoice:
             idx_result = result.loc[result['Invoice Number'] == i].index.tolist()
@@ -1146,15 +1160,19 @@ class Process_Methods():
         expect_amount_value = sum(result['Expected Amount'].tolist())
         paid_amount_value = sum(result['Paid Amount'].tolist())
 
-
-        last_line = len(result) + 1
+        last_line = len(invoice_number) + 5
         result.ix[last_line, 'Claim Number'] = 'Total:'
+
+        # print(expect_amount_value, paid_amount_value)
+
         result.ix[last_line, 'Expected Amount'] = expect_amount_value
         result.ix[last_line, 'Paid Amount'] = paid_amount_value
         result.ix[last_line, 'Patient Firstname'] = abs(result.ix[last_line, 'Expected Amount'] - result.ix[last_line, 'Paid Amount'])
 
+        result.ix[last_line+1, 'Claim Number'] = 'Payment Date:'
+        result.ix[last_line + 1, 'Expected Amount'] = payment_date
 
-        file_name_835= str(arrow.get().date()) + str(datetime.now().time().strftime("%H%M%S"))
+        file_name_835 = str(arrow.get().date()).replace("-", "") + str(datetime.now().time().strftime("%H%M%S"))
 
         current_path = os.getcwd()
         daily_folder = str(datetime.today().date())
@@ -1164,7 +1182,7 @@ class Process_Methods():
             os.makedirs(file_saving_path)
             print('Save files to {0}'.format(file_saving_path))
 
-        result.to_excel(os.path.join(file_saving_path, '835-Decoding-' + file_name_835 + '.xlsx'), index=False)
+        result.to_excel(os.path.join(file_saving_path, f'835-{ID_835}-{payment_date}-${format(paid_amount_value, ".2f")}-' + file_name_835 + '.xlsx'), index=False)
 
 
 class MongoDB_Methods():
