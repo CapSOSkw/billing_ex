@@ -247,6 +247,11 @@ class Process_Methods():
         :return: 1. A list, the codes should be used in this trip.
                 2. A dictionary, it contains code names and modifiers
         '''
+        try:
+            hospitalDischarge_flag = kwargs['hospitalDischarge_flag']
+            IBorOB_flag = kwargs['IBorOB_flag']
+        except:
+            raise ValueError
 
         result = []
         res_to_dict = {}
@@ -256,6 +261,8 @@ class Process_Methods():
             mileage_end = row['Mileage_End']
             pickup = row['polygonID_pickup']
             dropoff = row['polygonID_dropoff']
+            hospitalDischarge = row['HospitalDischarge']
+            IBorOB = row['IBorOB']
 
             # Rule 1 considers mileage.
             Rule1 = mileage in Process_Methods().frange(mileage_start, mileage_end, 0.01) if mileage_end > 0 else mileage > mileage_start
@@ -282,7 +289,26 @@ class Process_Methods():
             if not Rule3:
                 continue
 
+            # Rule 4 considers hospital discharge
+            if hospitalDischarge == hospitalDischarge_flag:
+                Rule4 = True
+            else:
+                Rule4 = False
+            if not Rule4:
+                continue
+
+            # Rule 5 considers IB or OB
+            if IBorOB < 0:
+                Rule5 = True
+            elif IBorOB == IBorOB_flag:
+                Rule5 = True
+            else:
+                Rule5 = False
+            if not Rule5:
+                continue
+
             # Other Rules #
+
 
             result.append(row['CodeName'])
             res_to_dict[row['CodeName']] = {
@@ -1438,6 +1464,10 @@ class Process_MAS():
         ####### Applied to following function ##########
         '''
         This function should be improved with args.
+        
+        
+        #### Modified on Aug.30 2018 ####
+        Probably, no need to improve this method, as long as 'Rule' in sqlite is properly designed.
         '''
         Rule_df = self.SQ.get_procedureCode_Rule_to_df('Rule')
         ########################
@@ -1450,13 +1480,21 @@ class Process_MAS():
         count = 0
 
         for i in leg_idx:
-            processed_pickup_address = raw_df.ix[i, 'processed_pickup_address']
+            processed_pickup_address = raw_df.ix[i, 'processed_pickup_address']    # Get processed addresses
             processed_dropoff_address = raw_df.ix[i, 'processed_dropoff_address']
-            mileage = float(raw_df.ix[i, 'Leg Mileage'])
+            mileage = float(raw_df.ix[i, 'Leg Mileage'])  # Get leg mileage
+
+            '''added on Aug.30 2018, for finding out A0100TG and A0100TF(hospital discharge)'''
+            hospitalDischarge = raw_df.ix[i, 'Transport Type']
+            hospitalDischarge_flag = 1 if 'Hospital Discharge' in hospitalDischarge else 0
+            IBorOB_flag = 0 if 'OB' in hospitalDischarge else 1 if 'IB' in hospitalDischarge else -1
+
+
             pickup_polygonIDs = self.P.getPolygonIDs(processed_pickup_address)
             dropoff_polygonIDs = self.P.getPolygonIDs(processed_dropoff_address)
 
-            procedureCodes, _ = self.P.generate_procedureCodes(Rule_df, mileage, pickup_polygonIDs, dropoff_polygonIDs)
+            procedureCodes, _ = self.P.generate_procedureCodes(Rule_df, mileage, pickup_polygonIDs, dropoff_polygonIDs,
+                                                               hospitalDischarge_flag=hospitalDischarge_flag, IBorOB_flag=IBorOB_flag)
 
             procedureCodes = list(sorted(set(procedureCodes), key=procedureCodes.index))
 
@@ -2410,7 +2448,7 @@ class EDI837P():
             SV1_04 = str(unit)
 
         LX1 = ["LX", "1"]
-        SV1 = ["SV1", SV1_01, str(amount), "UN", SV1_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        SV1 = ["SV1", SV1_01, format(amount, '.2f'), "UN", SV1_04, "", "", "1", "", "", "", "", "", "", "", "0"]
         DTP = ["DTP", "472", "D8", service_date]
 
         return '*'.join(LX1) + "~" + '*'.join(SV1) + "~" + '*'.join(DTP) + "~"
@@ -2428,7 +2466,7 @@ class EDI837P():
             SV2_04 = str(unit)
 
         LX2 = ["LX", "2"]
-        SV2 = ["SV1", SV2_01, str(amount), "UN", SV2_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        SV2 = ["SV1", SV2_01, format(amount, '.2f'), "UN", SV2_04, "", "", "1", "", "", "", "", "", "", "", "0"]
         DTP = ["DTP", "472", "D8", service_date]
 
         return '*'.join(LX2) + "~" + '*'.join(SV2) + "~" + '*'.join(DTP) + "~"
@@ -2447,7 +2485,7 @@ class EDI837P():
             SV3_04 = str(unit)
 
         LX3 = ["LX", "3"]
-        SV3 = ["SV1", SV3_01, str(amount), "UN", SV3_04 , "", "", "1", "", "", "", "", "", "", "", "0"]
+        SV3 = ["SV1", SV3_01, format(amount, '.2f'), "UN", SV3_04 , "", "", "1", "", "", "", "", "", "", "", "0"]
         DTP = ["DTP", "472", "D8", service_date]
 
         return '*'.join(LX3) + "~" + '*'.join(SV3) + "~" + '*'.join(DTP) + "~"
@@ -2465,7 +2503,7 @@ class EDI837P():
             SV4_04 = str(unit)
 
         LX4 = ["LX", "4"]
-        SV4 = ["SV1", SV4_01, str(amount), "UN", SV4_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        SV4 = ["SV1", SV4_01, format(amount, '.2f'), "UN", SV4_04, "", "", "1", "", "", "", "", "", "", "", "0"]
         DTP = ["DTP", "472", "D8", service_date]
 
         return '*'.join(LX4) + "~" + '*'.join(SV4) + "~" + '*'.join(DTP) + "~"
@@ -2483,7 +2521,7 @@ class EDI837P():
             SV5_04 = str(unit)
 
         LX5 = ["LX", "5"]
-        SV5 = ["SV1", SV5_01, str(amount), "UN", SV5_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        SV5 = ["SV1", SV5_01, format(amount, '.2f'), "UN", SV5_04, "", "", "1", "", "", "", "", "", "", "", "0"]
         DTP = ["DTP", "472", "D8", service_date]
 
         return '*'.join(LX5) + "~" + '*'.join(SV5) + "~" + '*'.join(DTP) + "~"
@@ -2501,7 +2539,7 @@ class EDI837P():
             SV6_04 = str(unit)
 
         LX6 = ["LX", "6"]
-        SV6 = ["SV1", SV6_01, str(amount), "UN", SV6_04, "", "", "1", "", "", "", "", "", "", "", "0"]
+        SV6 = ["SV1", SV6_01, format(amount, '.2f'), "UN", SV6_04, "", "", "1", "", "", "", "", "", "", "", "0"]
         DTP = ["DTP", "472", "D8", service_date]
 
         return '*'.join(LX6) + "~" + '*'.join(SV6) + "~" + '*'.join(DTP) + "~"
@@ -3067,6 +3105,13 @@ class MASProtocol():
             correct = root.findall('.//InvoicesCorrect')[0].text
             error = root.findall('.//InvoiceErrors')[0].text
 
+            for i in range(len(root.findall('.//invoicenumber'))):
+                if root.findall('.//UpdateStatus')[i].text in self.statusCodes.keys():
+                    logging.error(f'\nFailed: {root.findall(".//invoicenumber")[i].text};\nReason: {self.statusCodes[root.findall(".//UpdateStatus")[i].text]}.\n')
+
+                else:
+                    continue
+
             # print(f'Success: {correct};\nFailure (Or already attested): {error}')
             logging.info(f'\nSuccess: {correct};\nFailure (Or already attested): {error}')
 
@@ -3137,7 +3182,7 @@ if __name__ == '__main__':
     info_locker.base_info = dict_base_df[0] if dict_base_df else None
 
 
-    # p = Process_MAS('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
+    p = Process_MAS('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
 
     # print(info_locker.driver_information)
 

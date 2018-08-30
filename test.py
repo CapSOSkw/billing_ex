@@ -1,4 +1,5 @@
+def f(**kwargs):
 
-import billingex
 
-print(billingex.alpaca)
+
+f(a='123', b='321')
