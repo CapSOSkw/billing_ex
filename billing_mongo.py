@@ -309,7 +309,6 @@ class Process_Methods():
 
             # Other Rules #
 
-
             result.append(row['CodeName'])
             res_to_dict[row['CodeName']] = {
                 'Code': row['Code'],
@@ -2971,6 +2970,41 @@ class MASProtocol():
 
         self.df = self.df.loc[self.df['LEG STATUS'] == 0]
 
+        self.statusCodes = {
+            '3000': 'Driver Failure',
+            '3001': 'Incorrect ProviderNumber',
+            '3002': 'Invalid Expiration date',
+            '3004': 'Full Driver Name Missing',
+            '3005': 'Invalid Motorist ID',
+            '3006': 'Invalid Driver Status (Must be 0 or 1)',
+            '3010': 'Vehicle Failure',
+            '3014': 'Full VehicleNameNeeded',
+            '3015': 'Invalid Registration ID',
+            '3016': 'Invalid Vehicle Type',
+            '3018': 'Invalid Vehicle Status (Must be 0 or 1)',
+            '3021': 'No Trips Found matching current Criteria',
+            '3022': 'Invalid Invoice Number',
+            '3023': 'Invalid Start Date',
+            '3024': 'Invalid Leg Status',
+            '3025': 'Quantity Exceeds Maximum',
+            '3026': 'Current Open Corrections for this Invoice',
+            '3100': 'Session Not Found. The sessionIdentifier does not match an existing session. The call could not be completed',
+            '3101': 'SessionIdentifier Missing',
+            '3102': 'Invalid SessionIdentifier',
+            '3501': 'Invoice Number not in System',
+            '3502': 'Invoice no longer in Eligible Status',
+            '3503': 'Invoice not finalized, or has already been attested to',
+            '3504': 'Invoice trip date is after current date',
+            '3505': 'Leg Number no longer on file',
+            '3506': 'Vehicle not in System',
+            '3507': 'Vehicle Registration has expired',
+            '3508': 'Driver not in System',
+            '3509': 'Secondary Services Quantity invalid',
+            '3510': 'Secondary Service Quantity exceeds Maximum Allowable',
+            '3511': 'Secondary Services included, with no quantity supplied',
+            '3530': 'Invoice Leg data corrupted',
+        }
+
     def _makeStartSession(self):
         xml = []
 
@@ -3182,17 +3216,18 @@ if __name__ == '__main__':
     info_locker.base_info = dict_base_df[0] if dict_base_df else None
 
 
-    p = Process_MAS('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
+    # p = Process_MAS('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
 
     # print(info_locker.driver_information)
 
-    # y = Signoff().signoff('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
+    # y = Signoff().signoff('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-30/Processed MAS-2018-01-01-to-2018-01-31.xlsx', './TestData/Jan.2018 total jobs.xlsx')
 
-    # c = Compare_Signoff_PA('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx',
-    #                        'TestData/Roster-Export-2018-04-16-13-15-24.txt', 'CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/Processed MAS-2018-01-01-to-2018-01-31.xlsx')
-    # c.compare_signoff_pa()
+    # c = Compare_Signoff_PA('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-30/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx',
+    #                        'TestData/Roster-Export-2018-04-16-13-15-24.txt', 'CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-30/Processed MAS-2018-01-01-to-2018-01-31.xlsx')
+    # # c.compare_signoff_pa()
     # c.EDI_837_excel()
-    # Process_Methods.generate_837('CLEAN AIR CAR SERVICE AND PARKING COR/2018-07-30/837P Data-for-2018-01-01-to-2018-01-31.xlsx')
+
+    # Process_Methods.generate_837('CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-30/837P Data-for-2018-01-01-to-2018-01-31.xlsx')
     # Process_Methods.generate_270('TestData/Vendor-31226-2018-04-16-13-00-58.txt')
     # Process_Methods.process_271('Reglible180415202622.100001（0326-0416）.x12')
     # Process_Methods.process_276_receipt('276TEST/R180717173547.090001.x12', edi837='276TEST/837P-2 Data-for-2018-06-11-to-2018-06-17.xlsx')
@@ -3200,5 +3235,5 @@ if __name__ == '__main__':
     # c = Correction_compare_with_PDF('./2018-06-12/MAS Correction-2018-01-01-to-2018-01-31.xlsx', './TestData/NEW_Jan-March 2018 Payment new .xlsx')
     # c.check_PDF_payment()
 
-    # MAS_api = MASProtocol(signoff_file='CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-09/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx')
+    # MAS_api = MASProtocol(signoff_file='CLEAN AIR CAR SERVICE AND PARKING COR/2018-08-30/MAS Sign-off-2018-01-01-to-2018-01-31.xlsx')
     # MAS_api.main()
